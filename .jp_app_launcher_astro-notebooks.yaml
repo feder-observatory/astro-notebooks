@@ -2,7 +2,7 @@
 
 - title: Image viewers
   description: Widgets for viewing a folder of images or a single image
-  source: ../astro-notebooks/image-viewers.ipynb
+  source: ../astro_notebooks/image-viewers.ipynb
   icon: ../astro-notebooks/stellarphot-logo.svg
   cwd: not_used
   type: notebook
@@ -10,7 +10,7 @@
 
 - title: Reproject images
   description: Widgets for viewing a folder of images or a single image
-  source: ../astro-notebooks/reproject-images.ipynb
+  source: ../astro_notebooks/reproject-images.ipynb
   icon: ../astro-notebooks/stellarphot-logo.svg
   cwd: not_used
   type: notebook

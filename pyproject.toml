@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
   "jupyter-app-launcher",
+  "stellarphot",
 ]
 
 [project.urls]
@@ -48,9 +49,8 @@ include = [
 [tool.hatch.build.targets.wheel.shared-data]
 # This section determines what data files are included in the wheel
 # and where they should eventually be installed in the user's environment.
-# "docs/_static/stellarphot-logo.svg" = "share/jupyter/stellarphot/stellarphot-logo.svg"
 # This includes the notebooks used in the launcher
-"src/astro_notbooks/" = "share/jupyter/astro-notebooks"
+"src/astro_notebooks" = "share/jupyter/astro_notebooks"
 ".jp_app_launcher_astro-notebooks.yaml" = "share/jupyter/jupyter_app_launcher/jp_app_launcher_astro-notebooks.yaml"
 
 [tool.hatch.envs.types]
