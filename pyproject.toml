@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astro-notebooks"
+dynamic = ["version"]
+description = ''
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+keywords = []
+authors = [
+  { name = "Matt Craig", email = "mattwcraig@gmail.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "jupyter-app-launcher",
+]
+
+[project.urls]
+Documentation = "https://github.com/feder-observatory/astro-notebooks#readme"
+Issues = "https://github.com/feder-observatory/astro-notebooks/issues"
+Source = "https://github.com/feder-observatory/astro-notebooks"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/astro_notebooks/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    ".jp_app_launcher_astro-notebooks.yaml",
+    "src/astro_notebooks/",
+]
+
+[tool.hatch.build.targets.wheel.shared-data]
+# This section determines what data files are included in the wheel
+# and where they should eventually be installed in the user's environment.
+# "docs/_static/stellarphot-logo.svg" = "share/jupyter/stellarphot/stellarphot-logo.svg"
+# This includes the notebooks used in the launcher
+"src/astro_notbooks/" = "share/jupyter/astro-notebooks"
+".jp_app_launcher_astro-notebooks.yaml" = "share/jupyter/jupyter_app_launcher/jp_app_launcher_astro-notebooks.yaml"
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+  "mypy>=1.0.0",
+]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/astro_notebooks tests}"
+
+[tool.coverage.run]
+source_pkgs = ["astro_notebooks", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/astro_notebooks/__about__.py",
+]
+
+[tool.coverage.paths]
+astro_notebooks = ["src/astro_notebooks", "*/astro-notebooks/src/astro_notebooks"]
+tests = ["tests", "*/astro-notebooks/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
