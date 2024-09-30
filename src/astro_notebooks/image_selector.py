@@ -13,7 +13,7 @@ def _scale_and_downsample(data, downsample=4,
                          max_percent=99.5):
 
     scaled_data = data
-
+    scaled_data[scaled_data > 1e5] = 1e5
     if downsample > 1:
         scaled_data = block_reduce(scaled_data,
                                    block_size=(downsample, downsample))
