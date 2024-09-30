@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import ipywidgets as ipw
-import traitlets as tr
+import numpy as np
+
 from astropy.nddata import block_reduce
 from astropy.visualization import simple_norm
 from ccdproc import ImageFileCollection
@@ -22,7 +23,11 @@ def _scale_and_downsample(data, downsample=4,
                        max_percent=max_percent,
                        clip=True)
 
-    return norm(scaled_data)
+    # Replace all NaNs with 0
+    normed_data = norm(scaled_data)
+    normed_data[np.isnan(normed_data)] = 0
+
+    return normed_data
 
 
 class ImageWithSelector(ipw.VBox):
@@ -115,7 +120,6 @@ class ImageSelect(ipw.VBox):
     def _move_rejects_clicked(self, _):
         reject_land = Path(self.path / 'rejects')
         for f, selector in zip(self._im_base_bames, self._selectors):
-            print(f, selector._valid_mark.value, selector._fname)
             if not selector._valid_mark.value:
                 reject_land.mkdir(exist_ok=True)
                 source = Path(f + ".fit")
