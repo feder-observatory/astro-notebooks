@@ -122,7 +122,7 @@ class ImageSelect(ipw.VBox):
         for f, selector in zip(self._im_base_bames, self._selectors):
             if not selector._valid_mark.value:
                 reject_land.mkdir(exist_ok=True)
-                source = Path(f + ".fit")
+                source = self.path / Path(f + ".fit")
                 dest = reject_land / source.name
                 source.rename(dest)
 
