@@ -24,9 +24,9 @@
   type: notebook
   catalog: Astro tools
 
-- title: Bad color image
-  description: Review the images to be combined
-  source: ../astro_notebooks/quick-color-template.ipynb
+- title: Make color image
+  description: Turn your black and white images into color
+  source: ../astro_notebooks/color-mixer-template.ipynb
   icon: ../astro-notebooks/stellarphot-logo.svg
   cwd: not_used
   type: notebook
