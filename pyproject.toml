@@ -29,6 +29,8 @@ dependencies = [
   "stellarphot",
   "photutils",
   "Pillow",
+  "numpy",
+  "reproject>=0.13",
 ]
 
 [project.optional-dependencies]
