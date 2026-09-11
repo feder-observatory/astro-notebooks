@@ -7,7 +7,7 @@ name = "astro-notebooks"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "BSD-3-Clause"
 keywords = []
 authors = [
@@ -31,6 +31,7 @@ dependencies = [
   "Pillow",
   "numpy",
   "reproject>=0.13",
+  "astrowidgets>=0.6.0",
 ]
 
 [project.optional-dependencies]
