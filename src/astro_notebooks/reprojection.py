@@ -40,9 +40,13 @@ def reproject_to_reference(ccd, wcs_ref, shape_out, order=1,
 
     # The round-trip coordinate check roughly doubles the cost of the
     # reprojection and is unnecessary for well-behaved shifted images.
-    new_data, _ = reproject_interp(ccd, wcs_ref, shape_out=shape_out,
-                                   order=order, roundtrip_coords=False,
-                                   block_size=block_size)
+    # Skipping the footprint avoids allocating a full-frame float64 array
+    # that we would only discard; NaNs already mark pixels outside the
+    # input's footprint.
+    new_data = reproject_interp(ccd, wcs_ref, shape_out=shape_out,
+                                order=order, roundtrip_coords=False,
+                                block_size=block_size,
+                                return_footprint=False)
 
     # Cast to float32 first, then subtract in place, so we never allocate a
     # full-frame float64 temporary (reproject_interp returns float64) and skip
