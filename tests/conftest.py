@@ -8,8 +8,12 @@ IMAGE_SHAPE = (128, 128)
 
 @pytest.fixture
 def fits_dir(tmp_path, monkeypatch):
-    """Directory of small synthetic FITS images; cwd is moved to tmp_path
-    because ImageSelect creates its thumbs/ cache relative to cwd."""
+    """Directory of small synthetic FITS images.
+
+    ImageSelect caches its thumbnails in ``<data_dir>/thumbs``, so nothing
+    should be written to the current working directory; cwd is still moved
+    to tmp_path so that a test can check that.
+    """
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     rng = np.random.default_rng(42)

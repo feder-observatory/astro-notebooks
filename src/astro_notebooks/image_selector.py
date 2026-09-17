@@ -35,15 +35,38 @@ class _MessageSpinner(ipw.VBox):
         self.layout.display = "none"
 
 
-def _scale_and_downsample(data, downsample=8,
-                         min_percent=20,
-                         max_percent=99.5):
+# Rough number of image rows to read from disk at a time. The real band
+# height is rounded down to a multiple of the downsampling factor so that
+# block_reduce only ever trims a partial block in the very last band, which
+# is exactly what it would do for a whole-frame call.
+_TARGET_BAND_ROWS = 256
 
-    scaled_data = data.copy()
+
+def _band_height(downsample, target_rows=_TARGET_BAND_ROWS):
+    """Number of rows to read at a time, a multiple of ``downsample``."""
+    if downsample <= 1:
+        return max(int(target_rows), 1)
+    return max(downsample, (int(target_rows) // downsample) * downsample)
+
+
+def _clamp_and_reduce(data, downsample):
+    """Clamp bright pixels and block-average one band (or a whole frame).
+
+    The input is never modified. The result is float32, which keeps the
+    memory used by the band small; ``block_reduce`` trims any partial
+    block at the end of each axis.
+    """
+    # float32 copy: small, short lived, and never a view on the caller's data
+    scaled_data = np.asarray(data).astype(np.float32)
     scaled_data[scaled_data > 1e5] = 1e5
     if downsample > 1:
         scaled_data = block_reduce(scaled_data,
                                    block_size=(downsample, downsample))
+    return scaled_data
+
+
+def _normalize(scaled_data, min_percent=20, max_percent=99.5):
+    """Percentile-scale an already downsampled image and remove NaNs."""
     norm = simple_norm(scaled_data,
                        min_percent=min_percent,
                        max_percent=max_percent,
@@ -56,14 +79,65 @@ def _scale_and_downsample(data, downsample=8,
     return normed_data
 
 
+def _scale_and_downsample(data, downsample=8,
+                         min_percent=20,
+                         max_percent=99.5):
+    """Clamp, downsample and normalize an in-memory image.
+
+    This is the whole-frame version of :func:`_thumbnail_data`; both share
+    :func:`_clamp_and_reduce` and :func:`_normalize`, so they return
+    identical arrays for the same image.
+    """
+    return _normalize(_clamp_and_reduce(data, downsample),
+                      min_percent=min_percent,
+                      max_percent=max_percent)
+
+
+def _image_hdu(hdul):
+    """Primary HDU, or the first HDU that actually has data."""
+    for hdu in hdul:
+        if hdu.header.get('NAXIS', 0) > 0:
+            return hdu
+    raise ValueError('no image data found in FITS file')
+
+
+def _thumbnail_data(fits_path, downsample=8,
+                    min_percent=20,
+                    max_percent=99.5,
+                    band_rows=None):
+    """Downsampled, normalized image data read a band of rows at a time.
+
+    Only ``band_rows`` rows of the image are in memory at once, so a full
+    frame (and in particular a full float64 copy of one) is never made.
+    """
+    band = _band_height(downsample, band_rows or _TARGET_BAND_ROWS)
+
+    reduced = []
+    with fits.open(fits_path, memmap=True) as hdul:
+        hdu = _image_hdu(hdul)
+        n_rows = hdu.shape[0]
+        for row0 in range(0, n_rows, band):
+            row1 = min(row0 + band, n_rows)
+            if downsample > 1 and (row1 - row0) < downsample:
+                # block_reduce would trim these rows away anyway
+                break
+            # hdu.section reads only these rows from disk
+            reduced.append(_clamp_and_reduce(hdu.section[row0:row1, :],
+                                             downsample))
+
+    small = np.concatenate(reduced, axis=0)
+    return _normalize(small,
+                      min_percent=min_percent,
+                      max_percent=max_percent)
+
+
 def _make_one_thumbnail(fits_path, dest_path, downsample):
     """Make a single uint8 grayscale PNG thumbnail for a FITS image.
 
     Runs in a worker thread; the FITS read, numpy work and PNG encode all
     release the GIL for most of their run time.
     """
-    data = fits.getdata(fits_path)
-    scaled = _scale_and_downsample(data, downsample=downsample)
+    scaled = _thumbnail_data(fits_path, downsample=downsample)
     Image.fromarray((scaled * 255).astype(np.uint8), mode="L").save(dest_path)
 
 
@@ -103,7 +177,13 @@ class ImageWithSelector(ipw.VBox):
 
 
 class ImageSelect(ipw.VBox):
-    def __init__(self, *args, directory=".", downsample=8, max_workers=None, **kwargs):
+    # A small pool is both faster and roughly half the peak memory of the
+    # default (one thread per CPU) pool, which matters on a JupyterHub with
+    # a per-user memory cap.
+    DEFAULT_MAX_WORKERS = 4
+
+    def __init__(self, *args, directory=".", downsample=8,
+                 max_workers=DEFAULT_MAX_WORKERS, **kwargs):
         super().__init__(*args, **kwargs)
         self.path = Path(directory)
         self._downsample = downsample
@@ -111,7 +191,10 @@ class ImageSelect(ipw.VBox):
         self._collection = ImageFileCollection(self.path)
         self._move_rejects = ipw.Button(description='Move rejects')
 
-        self.thumbs = Path('thumbs')
+        # Cache thumbnails next to the data rather than in the current
+        # working directory, so that a cache is never reused for a
+        # different directory of images.
+        self.thumbs = self.path / 'thumbs'
         self.make_thumbnails(thumb_dir=self.thumbs)
         self.make_selectors(thumb_dir=self.thumbs)
         self.n_cols = 4
@@ -121,20 +204,25 @@ class ImageSelect(ipw.VBox):
         # self.layout.overflow = "scroll hidden"
         self._move_rejects.on_click(self._move_rejects_clicked)
 
-    def make_thumbnails(self, thumb_dir="thumbs"):
+    def make_thumbnails(self, thumb_dir=None):
         self._images = []
-        thumby = Path(thumb_dir)
-        thumby.mkdir(exist_ok=True)
+        thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
+        thumby.mkdir(parents=True, exist_ok=True)
         self._collection.refresh()
-        self._im_base_bames = []
+        # Full file names (with extension) and, in the same order, the stems
+        # used to name the thumbnail PNGs.
+        self._im_file_names = []
+        self._im_base_names = []
         todo = []
         for fname in self._collection.files_filtered(include_path=True):
-            base = Path(fname).stem
-            self._im_base_bames.append(base)
+            source = Path(fname)
+            base = source.stem
+            self._im_file_names.append(source.name)
+            self._im_base_names.append(base)
             dest_path = thumby / (base + '.png')
             if dest_path.exists():
                 continue
-            todo.append((Path(fname), dest_path))
+            todo.append((source, dest_path))
 
         if not todo:
             return
@@ -163,31 +251,31 @@ class ImageSelect(ipw.VBox):
             spinner.stop()
             progress_box.layout.display = "none"
 
-    def make_selectors(self, thumb_dir="thumbs"):
-        kiddos = []
-        pngs = list(Path(thumb_dir).glob('*.png'))
+    def make_selectors(self, thumb_dir=None):
+        thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
+        pngs = list(thumby.glob('*.png'))
 
         for thumb in pngs:
-            if thumb.stem not in self._im_base_bames:
+            if thumb.stem not in self._im_base_names:
                 thumb.unlink()
-        pngs = list(Path(thumb_dir).glob('*.png'))
+        pngs = list(thumby.glob('*.png'))
 
         png_dict = {p.stem: p for p in pngs}
 
         kiddos = {}
-        for ims in self._im_base_bames:
+        for ims in self._im_base_names:
             image_png = png_dict[ims].read_bytes()
             iws = ImageWithSelector(image_png, fname=ims)
             kiddos[ims] = iws
 
-        self._selectors = [kiddos[ims] for ims in self._im_base_bames]
+        self._selectors = [kiddos[ims] for ims in self._im_base_names]
 
     def _move_rejects_clicked(self, _):
         reject_land = Path(self.path / 'rejects')
-        for f, selector in zip(self._im_base_bames, self._selectors):
+        for f, selector in zip(self._im_file_names, self._selectors):
             if not selector._valid_mark.value:
                 reject_land.mkdir(exist_ok=True)
-                source = self.path / Path(f + ".fit")
+                source = self.path / f
                 dest = reject_land / source.name
                 source.rename(dest)
 

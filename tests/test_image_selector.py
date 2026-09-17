@@ -1,8 +1,11 @@
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import ipywidgets as ipw
 import numpy as np
+from astropy.io import fits
+from ccdproc import ImageFileCollection
 from PIL import Image
 
 from astro_notebooks.image_selector import (
@@ -10,6 +13,7 @@ from astro_notebooks.image_selector import (
     ImageWithSelector,
     _make_one_thumbnail,
     _scale_and_downsample,
+    _thumbnail_data,
 )
 
 from .conftest import IMAGE_SHAPE, N_IMAGES
@@ -69,8 +73,8 @@ def test_make_one_thumbnail(fits_dir, tmp_path):
 
 
 def test_thumbnails_one_per_fits_grayscale(fits_dir):
-    ImageSelect(directory=fits_dir)
-    thumbs_dir = Path("thumbs")
+    w = ImageSelect(directory=fits_dir)
+    thumbs_dir = w.thumbs
     png_names = {p.name for p in thumbs_dir.glob("*.png")}
     expected_names = {f"image-{i:03d}.png" for i in range(N_IMAGES)}
     assert png_names == expected_names
@@ -81,10 +85,11 @@ def test_thumbnails_one_per_fits_grayscale(fits_dir):
 
 
 def test_existing_thumbnails_not_regenerated(fits_dir):
+    thumbs = fits_dir / "thumbs"
     ImageSelect(directory=fits_dir)
-    mtimes = {p.name: p.stat().st_mtime_ns for p in Path("thumbs").glob("*.png")}
+    mtimes = {p.name: p.stat().st_mtime_ns for p in thumbs.glob("*.png")}
     ImageSelect(directory=fits_dir)
-    mtimes2 = {p.name: p.stat().st_mtime_ns for p in Path("thumbs").glob("*.png")}
+    mtimes2 = {p.name: p.stat().st_mtime_ns for p in thumbs.glob("*.png")}
     assert mtimes == mtimes2
 
 
@@ -92,17 +97,18 @@ def test_stale_thumbnails_cleaned_up(fits_dir):
     ImageSelect(directory=fits_dir)
     (fits_dir / "image-000.fit").unlink()
     ImageSelect(directory=fits_dir)
-    assert not (Path("thumbs") / "image-000.png").exists()
+    assert not (fits_dir / "thumbs" / "image-000.png").exists()
     for i in range(1, N_IMAGES):
-        assert (Path("thumbs") / f"image-{i:03d}.png").exists()
+        assert (fits_dir / "thumbs" / f"image-{i:03d}.png").exists()
 
 
 def test_parallel_matches_serial(fits_dir):
+    thumbs = fits_dir / "thumbs"
     ImageSelect(directory=fits_dir, max_workers=1)
-    serial = _thumb_arrays("thumbs")
-    shutil.rmtree("thumbs")
+    serial = _thumb_arrays(thumbs)
+    shutil.rmtree(thumbs)
     ImageSelect(directory=fits_dir, max_workers=2)
-    parallel = _thumb_arrays("thumbs")
+    parallel = _thumb_arrays(thumbs)
     assert serial.keys() == parallel.keys()
     for k in serial:
         assert serial[k].size > 0
@@ -134,7 +140,8 @@ def test_image_select_structure(fits_dir):
     assert len(w.children) == 2
     assert isinstance(w.children[0], ipw.GridspecLayout)
     assert isinstance(w.children[1], ipw.Button)
-    assert w._im_base_bames == [f"image-{i:03d}" for i in range(N_IMAGES)]
+    assert w._im_base_names == [f"image-{i:03d}" for i in range(N_IMAGES)]
+    assert w._im_file_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert len(w._selectors) == N_IMAGES
     for sel in w._selectors:
         assert isinstance(sel, ImageWithSelector)
@@ -146,8 +153,8 @@ def test_image_select_structure(fits_dir):
 
 
 def test_downsample_kwarg_flows_through(fits_dir):
-    ImageSelect(directory=fits_dir, downsample=4)
-    for p in Path("thumbs").glob("*.png"):
+    w = ImageSelect(directory=fits_dir, downsample=4)
+    for p in w.thumbs.glob("*.png"):
         img = Image.open(p)
         assert img.size == (IMAGE_SHAPE[1] // 4, IMAGE_SHAPE[0] // 4)
 
@@ -159,6 +166,91 @@ def test_move_rejects(fits_dir):
     assert (fits_dir / "rejects" / "image-000.fit").exists()
     assert not (fits_dir / "image-000.fit").exists()
     assert len(w._selectors) == N_IMAGES - 1
-    assert "image-000" not in w._im_base_bames
+    assert "image-000" not in w._im_base_names
+    assert "image-000.fit" not in w._im_file_names
     assert len(w.children) == 2
     assert isinstance(w.children[0], ipw.GridspecLayout)
+
+
+def test_thumb_cache_lives_in_data_dir(fits_dir, tmp_path):
+    w = ImageSelect(directory=fits_dir)
+    assert w.thumbs == fits_dir / "thumbs"
+    assert w.thumbs.is_dir()
+    assert len(list(w.thumbs.glob("*.png"))) == N_IMAGES
+    # cwd is tmp_path (see the fits_dir fixture); nothing should be written
+    # there, only the data directory itself should exist.
+    assert not (tmp_path / "thumbs").exists()
+    assert {p.name for p in tmp_path.iterdir()} == {"data"}
+
+
+def test_collection_ignores_thumbs_dir(fits_dir):
+    expected = set(ImageFileCollection(fits_dir).files)
+    assert expected == {f"image-{i:03d}.fit" for i in range(N_IMAGES)}
+    w = ImageSelect(directory=fits_dir)
+    assert (fits_dir / "thumbs").is_dir()
+    w._collection.refresh()
+    assert set(w._collection.files) == expected
+    # and a freshly built collection does not see the thumbnails either
+    assert set(ImageFileCollection(fits_dir).files) == expected
+
+
+def test_default_worker_cap_is_four(fits_dir, mocker):
+    spy = mocker.patch(
+        "astro_notebooks.image_selector.ThreadPoolExecutor",
+        side_effect=ThreadPoolExecutor,
+    )
+    ImageSelect(directory=fits_dir)
+    assert spy.call_count == 1
+    assert spy.call_args.kwargs["max_workers"] == 4
+
+
+def test_max_workers_kwarg_flows_through(fits_dir, mocker):
+    spy = mocker.patch(
+        "astro_notebooks.image_selector.ThreadPoolExecutor",
+        side_effect=ThreadPoolExecutor,
+    )
+    ImageSelect(directory=fits_dir, max_workers=2)
+    assert spy.call_count == 1
+    assert spy.call_args.kwargs["max_workers"] == 2
+
+
+def test_banded_read_matches_whole_frame(tmp_path):
+    # height is not a multiple of the band height (64) or of downsample (8),
+    # and the width is not a multiple of downsample either
+    rng = np.random.default_rng(1234)
+    data = rng.uniform(100.0, 1000.0, size=(300, 130))
+    data[0:2, 0:2] = np.nan
+    data[7, 7] = 2e5
+    path = tmp_path / "odd-shape.fit"
+    fits.PrimaryHDU(data).writeto(path)
+
+    banded = _thumbnail_data(path, downsample=8, band_rows=64)
+    whole = _scale_and_downsample(fits.getdata(path), downsample=8)
+    assert banded.shape == (300 // 8, 130 // 8)
+    assert np.array_equal(banded, whole)
+
+
+def test_banded_read_matches_whole_frame_no_downsample(tmp_path):
+    rng = np.random.default_rng(99)
+    data = rng.uniform(100.0, 1000.0, size=(70, 33)).astype(np.float32)
+    data[3, 3] = 5e5
+    path = tmp_path / "no-downsample.fit"
+    fits.PrimaryHDU(data).writeto(path)
+
+    banded = _thumbnail_data(path, downsample=1, band_rows=32)
+    whole = _scale_and_downsample(fits.getdata(path), downsample=1)
+    assert banded.shape == (70, 33)
+    assert np.array_equal(banded, whole)
+
+
+def test_banded_read_uses_first_hdu_with_data(tmp_path):
+    rng = np.random.default_rng(5)
+    data = rng.uniform(100.0, 1000.0, size=(64, 64))
+    path = tmp_path / "empty-primary.fit"
+    fits.HDUList(
+        [fits.PrimaryHDU(), fits.ImageHDU(data)]
+    ).writeto(path)
+
+    banded = _thumbnail_data(path, downsample=8)
+    whole = _scale_and_downsample(data, downsample=8)
+    assert np.array_equal(banded, whole)
