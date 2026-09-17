@@ -1,16 +1,22 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
 
 import ipywidgets as ipw
 import numpy as np
+import pytest
 from astropy.io import fits
 from PIL import Image
 
 from astro_notebooks.image_selector import (
+    SELECTION_FILE_NAME,
     ImageSelect,
     ImageWithSelector,
     _make_one_thumbnail,
     _scale_and_downsample,
     _thumbnail_data,
+    write_selection_manifest,
 )
 
 from .conftest import IMAGE_SHAPE, N_IMAGES
@@ -113,9 +119,9 @@ def test_no_progress_display_when_cached(fits_dir, mocker):
 
 def test_image_select_structure(fits_dir):
     w = ImageSelect(directory=fits_dir)
-    assert len(w.children) == 2
+    assert len(w.children) == 1
     assert isinstance(w.children[0], ipw.GridspecLayout)
-    assert isinstance(w.children[1], ipw.Button)
+    assert not [c for c in _walk_widgets(w) if isinstance(c, ipw.Button)]
     assert w._im_base_names == [f"image-{i:03d}" for i in range(N_IMAGES)]
     assert w._im_file_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert len(w._selectors) == N_IMAGES
@@ -133,19 +139,6 @@ def test_downsample_kwarg_flows_through(fits_dir):
     for p in w.thumbs.glob("*.png"):
         img = Image.open(p)
         assert img.size == (IMAGE_SHAPE[1] // 4, IMAGE_SHAPE[0] // 4)
-
-
-def test_move_rejects(fits_dir):
-    w = ImageSelect(directory=fits_dir)
-    w._selectors[0]._selector.value = False
-    w._move_rejects_clicked(None)
-    assert (fits_dir / "rejects" / "image-000.fit").exists()
-    assert not (fits_dir / "image-000.fit").exists()
-    assert len(w._selectors) == N_IMAGES - 1
-    assert "image-000" not in w._im_base_names
-    assert "image-000.fit" not in w._im_file_names
-    assert len(w.children) == 2
-    assert isinstance(w.children[0], ipw.GridspecLayout)
 
 
 def test_thumb_cache_lives_in_data_dir(fits_dir, tmp_path):
@@ -210,3 +203,117 @@ def test_banded_read_uses_first_hdu_with_data(tmp_path):
     banded = _thumbnail_data(path, downsample=8)
     whole = _scale_and_downsample(data, downsample=8)
     assert np.array_equal(banded, whole)
+
+
+def _selection_json(fits_dir):
+    return json.loads((fits_dir / SELECTION_FILE_NAME).read_text())
+
+
+def test_selection_file_written_at_construction(fits_dir):
+    w = ImageSelect(directory=fits_dir)
+    assert w.selection_path == fits_dir / SELECTION_FILE_NAME
+    saved = _selection_json(fits_dir)
+    assert saved == {f"image-{i:03d}.fit": True for i in range(N_IMAGES)}
+    assert w.selected_files == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
+    assert w.selected_paths == [fits_dir / f for f in w.selected_files]
+
+
+def test_selection_round_trip(fits_dir):
+    w = ImageSelect(directory=fits_dir)
+    w._selectors[1]._selector.value = False
+    w._selectors[3]._selector.value = False
+
+    expected = [f"image-{i:03d}.fit" for i in (0, 2, 4)]
+    assert w.selected_files == expected
+    saved = _selection_json(fits_dir)
+    assert saved["image-001.fit"] is False
+    assert saved["image-003.fit"] is False
+
+    w2 = ImageSelect(directory=fits_dir)
+    assert w2.selected_files == expected
+    for i, sel in enumerate(w2._selectors):
+        assert sel._selector.value == (i not in (1, 3))
+
+
+def test_new_file_defaults_to_included(fits_dir):
+    w = ImageSelect(directory=fits_dir)
+    w._selectors[0]._selector.value = False
+
+    # a frame that arrived after the selection was saved
+    rng = np.random.default_rng(3)
+    hdu = fits.PrimaryHDU(rng.uniform(100.0, 1000.0, size=IMAGE_SHAPE))
+    hdu.header["IMAGETYP"] = "LIGHT"
+    hdu.writeto(fits_dir / "image-099.fit")
+
+    w2 = ImageSelect(directory=fits_dir)
+    new_index = w2._im_file_names.index("image-099.fit")
+    assert w2._selectors[new_index]._selector.value
+    assert "image-099.fit" in w2.selected_files
+    assert "image-000.fit" not in w2.selected_files
+    assert _selection_json(fits_dir)["image-099.fit"] is True
+
+
+def test_entry_for_deleted_file_dropped(fits_dir):
+    ImageSelect(directory=fits_dir)
+    assert "image-000.fit" in _selection_json(fits_dir)
+
+    (fits_dir / "image-000.fit").unlink()
+    ImageSelect(directory=fits_dir)
+    saved = _selection_json(fits_dir)
+    assert "image-000.fit" not in saved
+    assert set(saved) == {f"image-{i:03d}.fit" for i in range(1, N_IMAGES)}
+
+
+def test_corrupt_selection_file_ignored(fits_dir):
+    (fits_dir / SELECTION_FILE_NAME).write_text("{not json at all")
+    with pytest.warns(UserWarning, match="image selection file"):
+        w = ImageSelect(directory=fits_dir)
+    assert w.selected_files == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
+    # the bad file has been replaced by a good one
+    assert _selection_json(fits_dir) == {
+        f"image-{i:03d}.fit": True for i in range(N_IMAGES)
+    }
+
+
+def test_selection_file_of_wrong_type_ignored(fits_dir):
+    (fits_dir / SELECTION_FILE_NAME).write_text('["image-000.fit"]')
+    with pytest.warns(UserWarning, match="image selection file"):
+        w = ImageSelect(directory=fits_dir)
+    assert w.selected_files == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
+
+
+def test_collection_from_selected_files(fits_dir):
+    w = ImageSelect(directory=fits_dir)
+    w._selectors[2]._selector.value = False
+    expected = [f"image-{i:03d}.fit" for i in (0, 1, 3, 4)]
+    assert w.selected_files == expected
+
+    images = ImageFileCollection(location=fits_dir, filenames=w.selected_files)
+    assert list(images.files) == expected
+    assert list(images.files_filtered(imagetyp="light")) == expected
+    # reducer's Combiner refreshes the collection before using it
+    images.refresh()
+    assert list(images.files) == expected
+    assert list(images.files_filtered(imagetyp="light")) == expected
+
+
+def test_write_selection_manifest(fits_dir, tmp_path):
+    w = ImageSelect(directory=fits_dir)
+    w._selectors[0]._selector.value = False
+    w._selectors[4]._selector.value = False
+
+    destination = tmp_path / "combined"
+    manifest_path = write_selection_manifest(w, destination, "run_one")
+    assert manifest_path == destination / "run_one_manifest.json"
+    assert manifest_path.exists()
+
+    manifest = json.loads(manifest_path.read_text())
+    assert set(manifest) == {
+        "run_label", "timestamp", "data_dir", "included", "excluded"
+    }
+    assert manifest["run_label"] == "run_one"
+    assert Path(manifest["data_dir"]) == fits_dir
+    assert manifest["included"] == [f"image-{i:03d}.fit" for i in (1, 2, 3)]
+    assert manifest["excluded"] == [f"image-{i:03d}.fit" for i in (0, 4)]
+    # a plain ISO timestamp
+    datetime.fromisoformat(manifest["timestamp"])

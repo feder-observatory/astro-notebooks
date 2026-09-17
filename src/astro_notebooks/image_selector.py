@@ -1,4 +1,9 @@
+import json
+import os
+import tempfile
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import ipywidgets as ipw
@@ -34,6 +39,61 @@ class _MessageSpinner(ipw.VBox):
 
     def stop(self):
         self.layout.display = "none"
+
+
+# Name of the file, written beside the data, that remembers which frames
+# the user has checked. It maps file name (with extension) -> bool.
+SELECTION_FILE_NAME = 'image_selection.json'
+
+
+def write_selection_manifest(isel, destination, run_label):
+    """Record which frames went into a combination.
+
+    Writes ``<destination>/<run_label>_manifest.json`` describing the
+    selection held by ``isel`` (an :class:`ImageSelect`) at the moment of
+    the call, and returns the path written.
+
+    The manifest holds the run label, an ISO timestamp, the data directory
+    the frames came from, and the ``included`` and ``excluded`` file names
+    (relative to that data directory).
+    """
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    included = list(isel.selected_files)
+    included_set = set(included)
+    excluded = [f for f in isel._im_file_names if f not in included_set]
+
+    manifest = {
+        'run_label': run_label,
+        'timestamp': datetime.now().astimezone().isoformat(),
+        'data_dir': str(isel.path),
+        'included': included,
+        'excluded': excluded,
+    }
+
+    manifest_path = destination / f'{run_label}_manifest.json'
+    _atomic_write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def _atomic_write_json(path, contents):
+    """Write ``contents`` as JSON to ``path`` without a partial file.
+
+    The JSON goes to a temporary file in the same directory, which is then
+    renamed over ``path``, so a reader never sees a half-written file.
+    """
+    path = Path(path)
+    handle, tmp_name = tempfile.mkstemp(dir=path.parent,
+                                        prefix=path.name + '.',
+                                        suffix='.tmp')
+    try:
+        with os.fdopen(handle, 'w') as f:
+            json.dump(contents, f, indent=2, sort_keys=True)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _clamp(data):
@@ -281,7 +341,6 @@ class ImageSelect(ipw.VBox):
         self._downsample = downsample
         self._max_workers = max_workers
         self._collection = ImageFileCollection(self.path)
-        self._move_rejects = ipw.Button(description='Move rejects')
 
         # Cache thumbnails next to the data rather than in the current
         # working directory, so that a cache is never reused for a
@@ -289,12 +348,91 @@ class ImageSelect(ipw.VBox):
         self.thumbs = self.path / 'thumbs'
         self.make_thumbnails(thumb_dir=self.thumbs)
         self.make_selectors(thumb_dir=self.thumbs)
+        # Restore first, then start watching the checkboxes, so that
+        # restoring does not itself trigger a save.
+        self._restore_selection()
+        for selector in self._selectors:
+            selector._selector.observe(self._selection_changed, names='value')
+        # Save once now so that the selection file always exists, and so
+        # that entries for files that have disappeared are dropped.
+        self.save_selection()
         self.n_cols = 4
         gs = self._make_grid()
-        self.children = [gs, self._move_rejects]
+        self.children = [gs]
         # self.layout.max_height = "400px"
         # self.layout.overflow = "scroll hidden"
-        self._move_rejects.on_click(self._move_rejects_clicked)
+
+    @property
+    def selection_path(self):
+        """Path of the JSON file that remembers the current selection."""
+        return self.path / SELECTION_FILE_NAME
+
+    @property
+    def selected_files(self):
+        """Names of the checked files, in collection order.
+
+        These are file names *relative to the data directory*, with the
+        extension, so they can be handed straight to
+        ``ImageFileCollection(location=data_dir, filenames=...)``.
+        """
+        return [fname
+                for fname, selector in zip(self._im_file_names,
+                                           self._selectors)
+                if selector._selector.value]
+
+    @property
+    def selected_paths(self):
+        """The checked files as full :class:`~pathlib.Path` objects."""
+        return [self.path / fname for fname in self.selected_files]
+
+    def _selection_changed(self, _change):
+        self.save_selection()
+
+    def save_selection(self):
+        """Write the current checkbox state beside the data.
+
+        Every file currently in the collection gets an entry, so entries
+        for files that no longer exist are dropped.
+        """
+        selection = {fname: bool(selector._selector.value)
+                     for fname, selector in zip(self._im_file_names,
+                                                self._selectors)}
+        _atomic_write_json(self.selection_path, selection)
+
+    def _read_selection(self):
+        """Saved selection, or an empty mapping if there is none to read."""
+        try:
+            with open(self.selection_path) as f:
+                saved = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            warnings.warn(
+                f'Ignoring unreadable image selection file '
+                f'{self.selection_path}; starting with all images included.',
+                stacklevel=2)
+            return {}
+
+        if not isinstance(saved, dict):
+            warnings.warn(
+                f'Ignoring image selection file {self.selection_path}, '
+                f'which does not contain a mapping of file name to True or '
+                f'False; starting with all images included.',
+                stacklevel=2)
+            return {}
+
+        return saved
+
+    def _restore_selection(self):
+        """Set the checkboxes from the saved selection, if there is one.
+
+        Files with no saved entry default to checked (included).
+        """
+        saved = self._read_selection()
+        if not saved:
+            return
+        for fname, selector in zip(self._im_file_names, self._selectors):
+            selector._selector.value = bool(saved.get(fname, True))
 
     def make_thumbnails(self, thumb_dir=None):
         """
@@ -386,20 +524,6 @@ class ImageSelect(ipw.VBox):
             kiddos[ims] = iws
 
         self._selectors = [kiddos[ims] for ims in self._im_base_names]
-
-    def _move_rejects_clicked(self, _):
-        reject_land = Path(self.path / 'rejects')
-        for f, selector in zip(self._im_file_names, self._selectors):
-            if not selector._valid_mark.value:
-                reject_land.mkdir(exist_ok=True)
-                source = self.path / f
-                dest = reject_land / source.name
-                source.rename(dest)
-
-        self.make_thumbnails()
-        self.make_selectors()
-        gs = self._make_grid()
-        self.children = [gs, self._move_rejects]
 
     def _make_grid(self):
         rows = len(self._selectors) // self.n_cols
