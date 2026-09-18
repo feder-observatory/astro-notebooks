@@ -1,6 +1,8 @@
+import html
 import json
 import os
 import secrets
+import traceback
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -791,6 +793,11 @@ class SelectedCombiner(Combiner):
     message : str
         Text shown below the combine button: why nothing was combined,
         why the combination failed, or what was combined.
+    last_error : Exception or None
+        What went wrong the last time the button was pressed, or ``None``
+        if nothing did.
+    last_traceback : str or None
+        Formatted traceback of ``last_error``; ``print`` it to read it.
 
     Notes
     -----
@@ -806,9 +813,26 @@ class SelectedCombiner(Combiner):
     because an `~ccdproc.ImageFileCollection` given an empty list of file
     names uses every file in the directory.
 
+    Only the checked frames that match ``apply_to`` are combined, and only
+    those are listed as ``included`` in the manifest; a checked dark in a
+    directory of lights is listed as ``excluded``. Nothing is combined if
+    no checked frame matches.
+
+    Nothing is combined either if the selection file beside the data does
+    not match the checkboxes of ``image_select``. That happens when the
+    cell that makes the selector is run again without re-running the cell
+    that makes this widget, which would otherwise silently combine the
+    frames checked in the old, discarded selector.
+
     When a combination finishes, `write_selection_manifest` records the
     frames that went into it, from the same snapshot, next to the result.
     No manifest is written if the combination fails.
+
+    No exception is allowed to escape from `action`. reducer only shows
+    the "Unlock settings" button once `action` has returned, so an
+    exception would leave the widget locked with no way to try again.
+    Failures are shown in the widget instead and kept in ``last_error``
+    and ``last_traceback``.
 
     Two attributes that are private to reducer are set when the button is
     pressed: ``Combiner._image_source`` and the ``_image_source`` of the
@@ -826,6 +850,8 @@ class SelectedCombiner(Combiner):
         self._image_select = image_select
         self._run_label = run_label
         self.manifest_path = None
+        self.last_error = None
+        self.last_traceback = None
         super().__init__(*args, file_name_base=run_label, **kwargs)
 
         self._message = ipw.HTML()
@@ -837,7 +863,7 @@ class SelectedCombiner(Combiner):
         """Text currently shown below the combine button."""
         return self._message.value
 
-    def _show_message(self, text, error=False):
+    def _show_message(self, text, error=False, detail=''):
         """
         Show a message below the combine button, or hide it.
 
@@ -847,26 +873,114 @@ class SelectedCombiner(Combiner):
             Message to show. An empty string hides the message.
         error : bool, optional
             If ``True`` the message is shown in bold red.
+        detail : str, optional
+            Plain text, such as a traceback, shown folded up below the
+            message.
         """
         if error:
             text = f'<b style="color: #b00020">{text}</b>'
+        if detail:
+            text += (f'<details><summary>Details</summary>'
+                     f'<pre>{html.escape(detail)}</pre></details>')
         self._message.value = text
         self._message.layout.display = 'flex' if text else 'none'
+
+    def _show_failure(self, text, err):
+        """
+        Show a failure in the widget and remember the exception.
+
+        Must be called while ``err`` is being handled, so that its
+        traceback can be recorded.
+
+        Parameters
+        ----------
+        text : str
+            What failed, in words. The exception is added to it.
+        err : Exception
+            The exception that was caught.
+        """
+        self.last_error = err
+        self.last_traceback = traceback.format_exc()
+        self._show_message(
+            f'{text} {html.escape(repr(err))}. Press "Unlock settings" to '
+            f'try again.', error=True, detail=self.last_traceback)
+
+    def _selection_on_disk(self):
+        """
+        Read the selector's selection file without changing anything.
+
+        Returns
+        -------
+        dict or None
+            Contents of the file, or ``None`` if it cannot be read or does
+            not hold a mapping, in which case it cannot be compared with
+            the checkboxes.
+        """
+        try:
+            with open(self._image_select.selection_path) as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return saved if isinstance(saved, dict) else None
+
+    def _selector_is_stale(self):
+        """
+        Whether the saved selection disagrees with the selector's checkboxes.
+
+        Returns
+        -------
+        bool
+            ``True`` if the selection file beside the data differs from the
+            state of the checkboxes in the selector this widget was made
+            with. Always ``False`` if the selector cannot save its
+            selection or the file cannot be read, because then the two are
+            not expected to match.
+
+        Notes
+        -----
+        Every change of a checkbox is saved at once, so the two only differ
+        if something else has written the file since: usually a newer
+        selector made by re-running the selector's cell, which is the one
+        the user is looking at.
+        """
+        isel = self._image_select
+        if not getattr(isel, '_can_save', True):
+            return False
+        on_disk = self._selection_on_disk()
+        if on_disk is None:
+            return False
+        current = {fname: bool(selector._selector.value)
+                   for fname, selector in zip(isel._im_file_names,
+                                              isel._selectors)}
+        return on_disk != current
 
     def action(self):
         """
         Combine the frames that are checked right now.
 
-        This runs when the combine button is pressed.
+        This runs when the combine button is pressed. It never raises; see
+        the Notes of the class. A failure is shown in the widget and kept
+        in ``last_error`` and ``last_traceback``.
+        """
+        self.manifest_path = None
+        self.last_error = None
+        self.last_traceback = None
+        try:
+            self._combine_selected()
+        except Exception as err:
+            self._show_failure('Something went wrong before the images '
+                               'were combined, and no manifest was '
+                               'written:', err)
 
-        Raises
-        ------
-        Exception
-            Whatever the combination raised, after the failure has been
-            shown in the widget. No manifest is written in that case.
+    def _combine_selected(self):
+        """
+        Do the work of `action`: check, combine, then write the manifest.
+
+        Failures of the combination and of writing the manifest are shown
+        in the widget here. Anything else that goes wrong is raised, and
+        `action` shows it.
         """
         selected = self._image_select.selected_files
-        self.manifest_path = None
 
         if not selected:
             self._show_message(
@@ -875,9 +989,35 @@ class SelectedCombiner(Combiner):
                 error=True)
             return
 
+        if self._selector_is_stale():
+            self._show_message(
+                f'Nothing was combined. The selection saved in '
+                f'{self._image_select.selection_path} does not match the '
+                f'image selector this combiner was made with. Most likely '
+                f'the cell that makes the image selector was run again (or '
+                f'the selection was changed from another notebook): re-run '
+                f'this cell too, then try again.', error=True)
+            return
+
         self._show_message('')
         collection = ImageFileCollection(location=self._image_select.path,
                                          filenames=selected)
+        # Only the checked frames that match apply_to get combined, so only
+        # those may be recorded as included.
+        apply_to = self.apply_to if self._apply_to else {}
+        to_combine = list(selected)
+        if apply_to:
+            to_combine = list(collection.files_filtered(**apply_to))
+            if not to_combine:
+                wanted = ', '.join(f'{k}={v}' for k, v in apply_to.items())
+                self._show_message(
+                    f'None of the checked images match {wanted}, so '
+                    f'nothing was combined. Check at least one such image, '
+                    f'press "Unlock settings" and try again.', error=True)
+                return
+            if len(to_combine) != len(selected):
+                collection = ImageFileCollection(
+                    location=self._image_select.path, filenames=to_combine)
         # reducer offers no public way to replace the collection, and the
         # group-by widget holds its own reference to it; see Notes above.
         self._image_source = collection
@@ -886,16 +1026,26 @@ class SelectedCombiner(Combiner):
         try:
             super().action()
         except Exception as err:
-            self._show_message(
-                f'The combination failed, and no manifest was written: '
-                f'{err!r}', error=True)
-            raise
+            self._show_failure('The combination failed, and no manifest '
+                               'was written:', err)
+            return
 
-        self.manifest_path = write_selection_manifest(
-            self._image_select, self.destination, self._run_label,
-            included=selected)
+        try:
+            self.manifest_path = write_selection_manifest(
+                self._image_select, self.destination, self._run_label,
+                included=to_combine)
+        except Exception as err:
+            self._show_failure(
+                f'The images WERE combined and written to '
+                f'{self.destination}, but the manifest that lists them '
+                f'could not be written:', err)
+            return
+
         n_total = len(self._image_select._im_file_names)
-        self._show_message(
-            f'Done. {len(selected)} of {n_total} images were checked when '
-            f'the button was pressed; they are listed in '
-            f'{self.manifest_path}.')
+        done = (f'Done. {len(to_combine)} of {n_total} images were combined; '
+                f'they are listed in {self.manifest_path}.')
+        n_skipped = len(selected) - len(to_combine)
+        if n_skipped:
+            done += (f' {n_skipped} checked image(s) did not match '
+                     f'apply_to and were left out.')
+        self._show_message(done)

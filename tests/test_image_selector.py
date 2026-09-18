@@ -643,9 +643,11 @@ def test_selected_combiner_no_manifest_when_combine_fails(combine_dirs,
     """A failed combination writes no manifest and shows the failure.
 
     A manifest next to a missing or half-made result would claim a
-    combination that did not happen. The error is still raised, so the
-    traceback is not lost, and the manifest left by an earlier successful
-    run is no longer reported as this run's.
+    combination that did not happen, and the manifest left by an earlier
+    successful run is no longer reported as this run's. The error is not
+    raised, because reducer only shows "Unlock settings" once ``action``
+    has returned and an exception would leave the widget locked; it is
+    kept on the combiner instead, so the traceback is not lost.
     """
     data_dir, destination = combine_dirs
     isel = ImageSelect(directory=data_dir)
@@ -653,9 +655,10 @@ def test_selected_combiner_no_manifest_when_combine_fails(combine_dirs,
     mocker.patch("reducer.astro_gui.Combiner.action",
                  side_effect=RuntimeError("disk full"))
 
-    with pytest.raises(RuntimeError, match="disk full"):
-        combiner.action()
+    combiner.action()
 
+    assert isinstance(combiner.last_error, RuntimeError)
+    assert "disk full" in combiner.last_traceback
     assert list(destination.iterdir()) == []
     assert combiner.manifest_path is None
     assert "disk full" in combiner.message
