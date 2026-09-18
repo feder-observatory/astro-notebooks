@@ -407,6 +407,10 @@ class ImageSelect(ipw.VBox):
         # written, so that a selection saved earlier is never overwritten
         # by one that was not restored from it.
         self._can_save = True
+        # True while the latest change of a checkbox has not reached the
+        # selection file; SelectedCombiner uses it to tell a failed save
+        # from a selector that has been replaced.
+        self._last_save_failed = False
         self._save_problem = ''
         self._message = ipw.HTML()
         self._message.layout.display = 'none'
@@ -482,12 +486,15 @@ class ImageSelect(ipw.VBox):
         try:
             self.save_selection()
         except OSError as err:
+            self._last_save_failed = True
             self._show_message(
-                f'This change could NOT be saved: {err!r}. The selection '
+                f'This change could NOT be saved: '
+                f'{html.escape(repr(err))}. The selection '
                 f'file {self.selection_path} does not match the checkboxes. '
                 f'Saving will be tried again at the next change.',
                 error=True)
         else:
+            self._last_save_failed = False
             self._show_message('')
 
     @property
@@ -515,8 +522,8 @@ class ImageSelect(ipw.VBox):
         """Tell the user that this widget is not saving the selection."""
         self._show_message(
             f'Selections are NOT being saved in this session: '
-            f'{self._save_problem}. Fix the problem and run this cell '
-            f'again.', error=True)
+            f'{html.escape(self._save_problem)}. Fix the problem and run '
+            f'this cell again.', error=True)
 
     def save_selection(self):
         """Write the current checkbox state beside the data.
@@ -945,6 +952,10 @@ class SelectedCombiner(Combiner):
         """
         isel = self._image_select
         if not getattr(isel, '_can_save', True):
+            return False
+        if getattr(isel, '_last_save_failed', False):
+            # The selector has already told the user that its latest change
+            # was not saved; the checkboxes are what the user sees.
             return False
         on_disk = self._selection_on_disk()
         if on_disk is None:

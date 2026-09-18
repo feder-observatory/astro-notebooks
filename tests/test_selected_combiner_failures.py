@@ -215,6 +215,31 @@ def test_stale_check_skipped_when_selector_cannot_save(mixed_dirs):
     assert manifest["included"] == LIGHTS
 
 
+def test_stale_check_skipped_after_failed_save(mixed_dirs, mocker):
+    """A failed save of the latest click does not block the combination.
+
+    When the write fails after a click the file on disk no longer matches
+    the checkboxes, but the selector has already said so in its own
+    message and the checkboxes are what the user sees. The combiner must
+    use them rather than refuse with a message about a re-run cell.
+    """
+    data_dir, destination = mixed_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_combiner(isel, destination)
+    mocker.patch("astro_notebooks.image_selector._atomic_write_json",
+                 side_effect=OSError("disk full"))
+    isel._selectors[isel._im_file_names.index(LIGHTS[0])]._selector.value = False
+    assert "could NOT be saved" in isel.message
+    mocker.stopall()
+
+    _press_go(combiner)
+
+    assert (destination / "run_filter_V.fit").exists()
+    manifest = json.loads(combiner.manifest_path.read_text())
+    assert manifest["included"] == [LIGHTS[1]]
+    _assert_unlockable(combiner)
+
+
 def test_stale_check_skipped_when_selection_file_unreadable(mixed_dirs):
     """A missing or unparseable selection file does not block the combine.
 
