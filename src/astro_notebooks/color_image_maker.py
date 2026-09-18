@@ -15,7 +15,7 @@ from astropy.visualization import (
 )
 from astrowidgets.bqplot import ImageWidget
 from matplotlib import pyplot as plt
-from photutils.background import Background2D, MedianBackground, MeanBackground
+from photutils.background import Background2D, MeanBackground
 
 #: The colours of the image, in the order they are stored in it.
 COLORS = ['red', 'green', 'blue']
@@ -375,13 +375,12 @@ class ColorImageMaker:
         self._image_directory = image_directory
         self.object_name = ''
 
-        # Data storage
-        self.data_sm = {}
+        # Data storage. The three frames are the only arrays the size of
+        # an image; everything else is reduced or a band of rows.
         self.data = {}
         self.data_sm_raw = {}
-        self.data_raw_unmod = {}
+        self.data_sm = {}
         self.bkgd_sm = {}
-        self.bkgd_f = {}
         # One plane of the preview per colour, each of them a pass over a
         # whole frame, so they are kept until something changes them.
         self.preview_planes = {}
@@ -399,7 +398,6 @@ class ColorImageMaker:
         # Reload data if widgets have already been built
         if hasattr(self, 'image_widgets'):
             self.bkgd_sm = {}
-            self.bkgd_f = {}
             self._load_data()
 
     # ------------------------------------------------------------------
@@ -561,16 +559,18 @@ class ColorImageMaker:
             # Native byte order float32: the frames are the only full size
             # arrays kept, so they are kept in the smallest type the data
             # came in.
-            self.data_raw_unmod[color] = np.asarray(data, dtype=np.float32)
+            self.data[color] = np.asarray(data, dtype=np.float32)
             if color == 'blue':
                 self.object_name = header['OBJECT']
 
-        blank_missing_pixels([self.data_raw_unmod[c] for c in self._colors])
+        blank_missing_pixels([self.data[c] for c in self._colors])
 
         for color in self._colors:
-            self.data_sm_raw[color] = block_mean(self.data_raw_unmod[color])
+            self.data_sm_raw[color] = block_mean(self.data[color])
 
-        self._apply_background(False)
+        if self.subtract_bkgd_checkbox.value:
+            self._compute_backgrounds()
+        self._apply_background(self.subtract_bkgd_checkbox.value)
 
         for color in self._colors:
             self.image_widgets[color].load_image(self.data_sm[color])
@@ -585,23 +585,35 @@ class ColorImageMaker:
         self.preview_planes.clear()
 
     def _compute_backgrounds(self):
-        """Compute and store background models for all channels (called lazily)."""
+        """
+        Fit a background to each reduced image (done once, when first asked).
+
+        The fit is made on the 8x reduced image only. Its boxes are 64
+        reduced pixels across, so it describes the same grid of sky
+        patches a fit to the frame itself would, and one fit now serves
+        both the preview and the image that gets saved, which cannot
+        therefore disagree about the sky.
+        """
         for color, sm_image in self.data_sm_raw.items():
             bkgd = Background2D(sm_image, (64, 64), filter_size=(3, 3), bkg_estimator=MeanBackground())
-            self.bkgd_sm[color] = bkgd.background
-        for color, raw_array in self.data_raw_unmod.items():
-            bkgd = Background2D(raw_array.copy(), (512, 512), filter_size=(3, 3), bkg_estimator=MeanBackground())
-            self.bkgd_f[color] = bkgd.background
+            self.bkgd_sm[color] = bkgd.background.astype(np.float32)
 
     def _apply_background(self, subtract):
-        """Fill data_sm and data from raw arrays, optionally subtracting the background."""
+        """
+        Set the reduced images the viewers show on the first tab.
+
+        Parameters
+        ----------
+        subtract : bool
+            Whether to take the background off them. The frames
+            themselves are left alone; the background comes off them a
+            band at a time, wherever they are used.
+        """
         for color in self._colors:
             if subtract:
                 self.data_sm[color] = self.data_sm_raw[color] - self.bkgd_sm[color]
-                self.data[color] = self.data_raw_unmod[color] - self.bkgd_f[color]
             else:
-                self.data_sm[color] = self.data_sm_raw[color].copy()
-                self.data[color] = self.data_raw_unmod[color].copy()
+                self.data_sm[color] = self.data_sm_raw[color]
 
     # ------------------------------------------------------------------
     # Image scaling and rendering
@@ -646,6 +658,18 @@ class ColorImageMaker:
             [self.r_slider.value, self.g_slider.value, self.b_slider.value],
         ))
 
+    def _backgrounds(self):
+        """
+        The background to take off each frame, if the box is ticked.
+
+        Returns
+        -------
+        dict or None
+            The reduced background of each colour, or None when the
+            background is to be left in.
+        """
+        return self.bkgd_sm if self.subtract_bkgd_checkbox.value else None
+
     def _full_res_rgb(self):
         """
         Build the finished image at full size, ready to be written out.
@@ -656,7 +680,7 @@ class ColorImageMaker:
             The image, ``(rows, columns, 3)`` of uint8.
         """
         return rgb_uint8(self.data, self._intervals(), self._stretch(),
-                         self._weights())
+                         self._weights(), backgrounds=self._backgrounds())
 
     def _preview_plane(self, color):
         """
@@ -677,9 +701,11 @@ class ColorImageMaker:
             The plane, `REDUCE` times smaller than the frame.
         """
         if color not in self.preview_planes:
+            backgrounds = self._backgrounds()
             self.preview_planes[color] = preview_plane(
                 self.data[color], self._intervals()[color], self._stretch(),
                 self._weights()[color],
+                background=None if backgrounds is None else backgrounds[color],
             )
         return self.preview_planes[color]
 

@@ -112,7 +112,7 @@ def test_construction_loads_images(maker):
         assert isinstance(viewer.get_cuts(), ManualInterval)
         assert isinstance(viewer.get_stretch(), LinearStretch)
         assert maker._preview_plane(color).shape == REDUCED_SHAPE
-        assert maker.data_raw_unmod[color].shape == IMAGE_SHAPE
+        assert maker.data[color].shape == IMAGE_SHAPE
 
 
 def test_level_slider_sets_cuts(maker):
@@ -557,12 +557,12 @@ def test_loading_blanks_pixels_missing_from_any_one_filter(tmp_path):
 
     maker = ColorImageMaker(str(directory))
 
-    missing = np.isnan(maker.data_raw_unmod["red"])
+    missing = np.isnan(maker.data["red"])
     # The three strips together, with no pixel counted twice.
     assert missing.sum() == 2 * IMAGE_SHAPE[1] + 3 * IMAGE_SHAPE[0] - 6 + IMAGE_SHAPE[1] - 3
     for color in COLORS:
-        assert maker.data_raw_unmod[color].dtype == np.float32
-        np.testing.assert_array_equal(np.isnan(maker.data_raw_unmod[color]), missing)
+        assert maker.data[color].dtype == np.float32
+        np.testing.assert_array_equal(np.isnan(maker.data[color]), missing)
 
 
 def test_preview_is_the_saved_image_averaged(maker):
@@ -606,3 +606,55 @@ def test_slider_move_makes_nothing_the_size_of_a_frame(big_maker):
         tracemalloc.stop()
 
     assert peak < frame_bytes
+
+
+def test_background_on_then_off_gives_back_the_same_preview(maker):
+    """Unticking the background box puts the preview back as it was.
+
+    The background is no longer taken off a second copy of each frame but
+    off a band at a time wherever the frame is used, so the frames
+    themselves have to come through the round trip untouched, and the
+    preview has to change while the box is ticked.
+    """
+    maker.level_sliders["red"].value = (50.0, 800.0)
+    before = {color: maker._preview_plane(color).copy() for color in COLORS}
+    frame_before = maker.data["red"].copy()
+
+    maker.subtract_bkgd_checkbox.value = True
+    assert not np.allclose(before["red"], maker.preview_planes["red"])
+
+    maker.subtract_bkgd_checkbox.value = False
+
+    for color in COLORS:
+        np.testing.assert_array_equal(before[color], maker.preview_planes[color])
+    np.testing.assert_array_equal(frame_before, maker.data["red"])
+
+
+def test_one_background_fit_serves_the_preview_and_the_file(maker):
+    """Preview and saved image lose the same background, fitted once.
+
+    There used to be two fits, one on the reduced image for the preview
+    and another on the frame itself for the file, so the two disagreed
+    about the sky and the second cost a copy of every frame. The reduced
+    fit is now the only one, stretched back up block by block.
+    """
+    maker.level_sliders["green"].value = (0.0, 700.0)
+
+    maker.subtract_bkgd_checkbox.value = True
+
+    assert set(maker.bkgd_sm) == set(COLORS)
+    assert maker.bkgd_sm["green"].shape == REDUCED_SHAPE
+    full_background = np.repeat(
+        np.repeat(maker.bkgd_sm["green"], REDUCE, axis=0), REDUCE, axis=1
+    )
+    full_size = scaled_band(
+        maker.data["green"] - full_background,
+        ManualInterval(0.0, 700.0),
+        maker._stretch(),
+        maker._weights()["green"],
+    )
+    np.testing.assert_allclose(
+        maker.preview_planes["green"], _block_means(full_size), rtol=1e-6
+    )
+    saved = maker._full_res_rgb()
+    np.testing.assert_array_equal(saved[:, :, 1], (full_size * 255).astype(np.uint8))
