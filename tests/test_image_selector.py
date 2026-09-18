@@ -7,6 +7,7 @@ import ipywidgets as ipw
 import numpy as np
 import pytest
 from astropy.io import fits
+from ccdproc import ImageFileCollection
 from PIL import Image
 
 from astro_notebooks.image_selector import (

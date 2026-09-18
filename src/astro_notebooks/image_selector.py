@@ -310,6 +310,10 @@ class ImageSelect(ipw.VBox):
     """
     Grid of image thumbnails, each with a checkbox for keeping the image.
 
+    The checkbox state is written to ``<directory>/image_selection.json``
+    every time a checkbox changes and is restored from that file when the
+    widget is made again for the same directory. No files are moved.
+
     Parameters
     ----------
     *args
