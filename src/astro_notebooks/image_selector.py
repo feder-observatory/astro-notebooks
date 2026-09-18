@@ -1,6 +1,6 @@
 import json
 import os
-import tempfile
+import secrets
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -103,21 +103,44 @@ def write_selection_manifest(isel, destination, run_label, included=None):
 
 
 def _atomic_write_json(path, contents):
-    """Write ``contents`` as JSON to ``path`` without a partial file.
+    """
+    Write ``contents`` as JSON to ``path`` without a partial file.
 
-    The JSON goes to a temporary file in the same directory, which is then
-    renamed over ``path``, so a reader never sees a half-written file.
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        File to write. Its directory must already exist.
+    contents : object
+        Anything `json.dump` can serialize.
+
+    Notes
+    -----
+    The JSON goes to a temporary file in the same directory, which is
+    flushed to disk and then renamed over ``path``, so a reader never sees
+    a half-written file. The temporary file is removed if anything fails.
+
+    A new file gets the permissions any ordinary new file would (set by
+    the process umask); rewriting an existing file keeps that file's
+    permissions.
     """
     path = Path(path)
-    handle, tmp_name = tempfile.mkstemp(dir=path.parent,
-                                        prefix=path.name + '.',
-                                        suffix='.tmp')
+    tmp_name = path.parent / f'{path.name}.{secrets.token_hex(4)}.tmp'
+    # Mode 0o666 lets the kernel apply the umask, unlike tempfile.mkstemp,
+    # which always makes the file readable by its owner only.
+    handle = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(handle, 'w') as f:
             json.dump(contents, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_name, path.stat().st_mode & 0o7777)
+        except FileNotFoundError:
+            # No existing file, so the umask-derived mode stands.
+            pass
         os.replace(tmp_name, path)
     except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
+        tmp_name.unlink(missing_ok=True)
         raise
 
 
