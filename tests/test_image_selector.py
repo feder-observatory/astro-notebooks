@@ -170,7 +170,7 @@ def test_no_progress_display_when_cached(fits_dir, mocker):
 
 
 def test_image_select_structure(fits_dir):
-    """The widget is a single grid holding one selector per image.
+    """The widget is a hidden message above one grid of selectors.
 
     Also checks that no button is left (nothing is moved any more, so
     "Move rejects" is gone), that the thumbnail names and file names are
@@ -178,8 +178,9 @@ def test_image_select_structure(fits_dir):
     is showing real PNG bytes.
     """
     w = ImageSelect(directory=fits_dir)
-    assert len(w.children) == 1
-    assert isinstance(w.children[0], ipw.GridspecLayout)
+    assert len(w.children) == 2
+    assert w.children[0].layout.display == 'none' and w.message == ''
+    assert isinstance(w.children[1], ipw.GridspecLayout)
     assert not [c for c in _walk_widgets(w) if isinstance(c, ipw.Button)]
     assert w._im_base_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert w._im_file_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
@@ -374,16 +375,19 @@ def test_entry_for_deleted_file_dropped(fits_dir):
 
 
 def test_corrupt_selection_file_ignored(fits_dir):
-    """An unreadable selection file is ignored with a warning.
+    """A selection file that is not JSON is set aside with a warning.
 
-    The widget must still open, with every image included, and the bad
-    file is replaced by a valid one so the warning does not come back on
-    every later run.
+    The widget must still open, with every image included. The bad file
+    is kept as ``image_selection.json.bak`` rather than destroyed, and is
+    replaced by a valid one so the warning does not come back on every
+    later run.
     """
     (fits_dir / SELECTION_FILE_NAME).write_text("{not json at all")
     with pytest.warns(UserWarning, match="image selection file"):
         w = ImageSelect(directory=fits_dir)
     assert w.selected_files == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
+    backup = fits_dir / (SELECTION_FILE_NAME + ".bak")
+    assert backup.read_text() == "{not json at all"
     # the bad file has been replaced by a good one
     assert _selection_json(fits_dir) == {
         f"image-{i:03d}.fit": True for i in range(N_IMAGES)

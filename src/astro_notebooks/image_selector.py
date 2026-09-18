@@ -400,6 +400,14 @@ class ImageSelect(ipw.VBox):
         self.thumbs = self.path / 'thumbs'
         self.make_thumbnails(thumb_dir=self.thumbs)
         self.make_selectors(thumb_dir=self.thumbs)
+        # Saving is switched off, for the life of this widget, if the
+        # selection file cannot be read or the directory cannot be
+        # written, so that a selection saved earlier is never overwritten
+        # by one that was not restored from it.
+        self._can_save = True
+        self._save_problem = ''
+        self._message = ipw.HTML()
+        self._message.layout.display = 'none'
         # Restore first, then start watching the checkboxes, so that
         # restoring does not itself trigger a save.
         self._restore_selection()
@@ -407,10 +415,22 @@ class ImageSelect(ipw.VBox):
             selector._selector.observe(self._selection_changed, names='value')
         # Save once now so that the selection file always exists, and so
         # that entries for files that have disappeared are dropped.
-        self.save_selection()
+        if self._can_save:
+            try:
+                self.save_selection()
+            except OSError as err:
+                self._can_save = False
+                self._save_problem = repr(err)
+                warnings.warn(
+                    f'The image selection cannot be saved to '
+                    f'{self.selection_path}: {err!r}. Choices made in this '
+                    f'widget will not be remembered.',
+                    stacklevel=2)
+        if not self._can_save:
+            self._show_not_saving_message()
         self.n_cols = 4
         gs = self._make_grid()
-        self.children = [gs]
+        self.children = [self._message, gs]
         # self.layout.max_height = "400px"
         # self.layout.overflow = "scroll hidden"
 
@@ -444,15 +464,75 @@ class ImageSelect(ipw.VBox):
         Observer for the ``value`` trait of every tile's checkbox, attached
         in ``__init__`` after the saved selection has been restored so that
         restoring does not trigger a save.
+
+        Notes
+        -----
+        An exception raised in a widget observer is logged by the kernel
+        and never reaches the notebook, so a failed save is reported in
+        the widget's own message instead; that message is the only sign
+        the user gets. Saving is tried again on the next change, and
+        since each save writes the whole selection a later success loses
+        nothing.
         """
-        self.save_selection()
+        if not self._can_save:
+            self._show_not_saving_message()
+            return
+        try:
+            self.save_selection()
+        except OSError as err:
+            self._show_message(
+                f'This change could NOT be saved: {err!r}. The selection '
+                f'file {self.selection_path} does not match the checkboxes. '
+                f'Saving will be tried again at the next change.',
+                error=True)
+        else:
+            self._show_message('')
+
+    @property
+    def message(self):
+        """Text currently shown above the grid of images."""
+        return self._message.value
+
+    def _show_message(self, text, error=False):
+        """
+        Show a message above the grid of images, or hide it.
+
+        Parameters
+        ----------
+        text : str
+            Message to show. An empty string hides the message.
+        error : bool, optional
+            If ``True`` the message is shown in bold red.
+        """
+        if error:
+            text = f'<b style="color: #b00020">{text}</b>'
+        self._message.value = text
+        self._message.layout.display = 'flex' if text else 'none'
+
+    def _show_not_saving_message(self):
+        """Tell the user that this widget is not saving the selection."""
+        self._show_message(
+            f'Selections are NOT being saved in this session: '
+            f'{self._save_problem}. Fix the problem and run this cell '
+            f'again.', error=True)
 
     def save_selection(self):
         """Write the current checkbox state beside the data.
 
         Every file currently in the collection gets an entry, so entries
         for files that no longer exist are dropped.
+
+        Nothing is written if saving has been switched off because the
+        selection file could not be read, or the directory could not be
+        written, when the widget was made.
+
+        Raises
+        ------
+        OSError
+            If the file cannot be written.
         """
+        if not self._can_save:
+            return
         selection = {fname: bool(selector._selector.value)
                      for fname, selector in zip(self._im_file_names,
                                                 self._selectors)}
@@ -479,6 +559,13 @@ class ImageSelect(ipw.VBox):
 
         Notes
         -----
+        A file that exists but cannot be read (a permission problem, or a
+        passing fault on a network disk) may well hold a good selection,
+        so it is left alone and saving is switched off for this widget
+        (``_can_save``) rather than letting the next save overwrite it. A
+        file that can be read but does not hold a JSON mapping is moved
+        aside to ``image_selection.json.bak`` before a new one is written.
+
         Entries with a value that is not a real boolean are dropped one at
         a time rather than rejecting the whole file. ``__init__`` saves the
         selection right after restoring it, so rejecting the whole file
@@ -491,18 +578,26 @@ class ImageSelect(ipw.VBox):
                 saved = json.load(f)
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError):
-            warnings.warn(
-                f'Ignoring unreadable image selection file '
-                f'{self.selection_path}; starting with all images included.',
-                stacklevel=2)
+        except OSError as err:
+            self._stop_saving(err)
             return {}
+        except ValueError:
+            # Not JSON at all; handled with "not a mapping" below.
+            saved = None
 
         if not isinstance(saved, dict):
+            backup = self.selection_path.with_name(
+                self.selection_path.name + '.bak')
+            try:
+                os.replace(self.selection_path, backup)
+            except OSError as err:
+                self._stop_saving(err)
+                return {}
             warnings.warn(
                 f'Ignoring image selection file {self.selection_path}, '
                 f'which does not contain a mapping of file name to True or '
-                f'False; starting with all images included.',
+                f'False; it has been moved to {backup.name}. Starting with '
+                f'all images included.',
                 stacklevel=2)
             return {}
 
@@ -519,6 +614,24 @@ class ImageSelect(ipw.VBox):
                      if name not in bad}
 
         return saved
+
+    def _stop_saving(self, err):
+        """
+        Switch saving off because the selection file could not be read.
+
+        Parameters
+        ----------
+        err : OSError
+            The error raised while reading the file or moving it aside.
+        """
+        self._can_save = False
+        self._save_problem = repr(err)
+        warnings.warn(
+            f'Could not read the image selection file '
+            f'{self.selection_path}: {err!r}. It has been left alone, all '
+            f'images start out included, and choices made in this widget '
+            f'will not be saved.',
+            stacklevel=3)
 
     def _restore_selection(self):
         """
