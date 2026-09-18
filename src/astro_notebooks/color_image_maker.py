@@ -4,9 +4,7 @@ import io
 import os
 
 import ipywidgets as ipw
-import matplotlib.image as mimg
 import numpy as np
-from IPython.display import display
 from PIL import Image
 from astropy.io import fits
 from astropy.visualization import (
@@ -381,7 +379,6 @@ class ColorImageMaker:
         self.data_sm = {}
         self.data = {}
         self.sc_raw = {}
-        self.sc_raw_f = {}
         self.data_sm_raw = {}
         self.data_raw_unmod = {}
         self.bkgd_sm = {}
@@ -490,7 +487,7 @@ class ColorImageMaker:
         self.subtract_bkgd_checkbox.observe(self._on_subtract_change, names='value')
 
     def _build_save_tab(self):
-        """Build tab 3: full-resolution preview and save controls."""
+        """Build tab 3: a look at the finished image and the save controls."""
         filename_input = ipw.Text(
             description='Add to filename:',
             value='',
@@ -499,7 +496,9 @@ class ColorImageMaker:
             layout={'width': '400px'},
         )
         status_html = ipw.HTML('')
-        full_res_output = ipw.Output()
+        # A PNG of the finished image, made smaller so that the browser is
+        # not asked to show sixteen million pixels.
+        full_res_display = ipw.Image(format='png', layout={'width': '100%'})
         save_button = ipw.Button(description='Save image', button_style='success')
         save_status_label = ipw.Label('')
 
@@ -508,11 +507,8 @@ class ColorImageMaker:
 
         def refresh():
             status_html.value = '<p style="padding:10px 0">Generating full resolution image…</p>'
-            r, g, b = self.r_slider.value, self.g_slider.value, self.b_slider.value
-            cached['full_res_rgb'], _ = self._rgb_scaling(self.sc_raw_f, r, g, b)
-            with full_res_output:
-                full_res_output.clear_output()
-                self._full_res_color_rgb(r, g, b, cached['full_res_rgb'])
+            cached['full_res_rgb'] = self._full_res_rgb()
+            full_res_display.value = reduced_png_bytes(cached['full_res_rgb'])
             status_html.value = ''
 
         def _reset_save_button():
@@ -531,7 +527,7 @@ class ColorImageMaker:
                 save_status_label.value = f'{filename} already exists. Click again to overwrite.'
                 return
 
-            mimg.imsave(filename, cached['full_res_rgb'])
+            Image.fromarray(cached['full_res_rgb'], mode='RGB').save(filename)
             save_status_label.value = f'Saved: {filename}'
             _reset_save_button()
 
@@ -543,7 +539,7 @@ class ColorImageMaker:
             filename_input,
             ipw.HBox([save_button, save_status_label]),
             status_html,
-            full_res_output,
+            full_res_display,
         ])
         return widget, refresh
 
@@ -578,7 +574,7 @@ class ColorImageMaker:
                 self._stretches[self.stretch_chooser.value]
             )
 
-        # Initialise sc_raw / sc_raw_f using current slider cuts
+        # Initialise sc_raw using current slider cuts
         for color in self._colors:
             self._make_level_observer(color)(dict(new=self.level_sliders[color].value))
 
@@ -604,6 +600,57 @@ class ColorImageMaker:
     # ------------------------------------------------------------------
     # Image scaling and rendering
     # ------------------------------------------------------------------
+
+    def _intervals(self):
+        """
+        The black and white points the level sliders are set to.
+
+        Returns
+        -------
+        dict
+            A `~astropy.visualization.ManualInterval` for each colour.
+        """
+        return {
+            color: ManualInterval(*self.level_sliders[color].value)
+            for color in self._colors
+        }
+
+    def _stretch(self):
+        """
+        The stretch the dropdown is set to, used for all three colours.
+
+        Returns
+        -------
+        `astropy.visualization.BaseStretch`
+            The chosen stretch.
+        """
+        return self._stretches[self.stretch_chooser.value]
+
+    def _weights(self):
+        """
+        How much of each colour the mixer sliders ask for.
+
+        Returns
+        -------
+        dict
+            A number from 0 to 1 for each colour.
+        """
+        return dict(zip(
+            self._colors,
+            [self.r_slider.value, self.g_slider.value, self.b_slider.value],
+        ))
+
+    def _full_res_rgb(self):
+        """
+        Build the finished image at full size, ready to be written out.
+
+        Returns
+        -------
+        `numpy.ndarray`
+            The image, ``(rows, columns, 3)`` of uint8.
+        """
+        return rgb_uint8(self.data, self._intervals(), self._stretch(),
+                         self._weights())
 
     def _rgb_scaling(self, sc_data, r=0.5, g=0.5, b=0.5):
         red_sc = r * sc_data['red']
@@ -631,19 +678,6 @@ class ColorImageMaker:
             ax.imshow(comb, vmin=0, vmax=1)
             plt.show()
 
-    def _full_res_color_rgb(self, r=0.5, g=0.5, b=0.5, comb=None):
-        if comb is None:
-            comb, _ = self._rgb_scaling(self.sc_raw_f, r, g, b)
-        fig, ax = plt.subplots(figsize=(20, 20))
-        max_img = np.nanmax(comb.flatten())
-        min_img = np.nanmin(comb.flatten())
-        maxes = [np.nanmax(comb[:, :, i]) for i in range(3)]
-        ax.set_title(f'{max_img=:.3f} {min_img=:.3f} {r=:.2f} {g=:.2f} {b=:.2f}\n{maxes=}')
-        ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
-        ax.imshow(comb, vmin=0, vmax=1)
-        display(fig)
-        plt.close(fig)
-
     # ------------------------------------------------------------------
     # Observers / callbacks
     # ------------------------------------------------------------------
@@ -658,9 +692,6 @@ class ColorImageMaker:
             self.sc_raw[color] = self._get_scaled_image_data(
                 self.image_widgets[color], self.data_sm[color]
             )
-            self.sc_raw_f[color] = self._get_scaled_image_data(
-                self.image_widgets[color], self.data[color]
-            )
         return observer
 
     def _stretch_observer(self, change):
@@ -668,9 +699,6 @@ class ColorImageMaker:
             self.image_widgets[color].set_stretch(self._stretches[change['new']])
             self.sc_raw[color] = self._get_scaled_image_data(
                 self.image_widgets[color], self.data_sm[color]
-            )
-            self.sc_raw_f[color] = self._get_scaled_image_data(
-                self.image_widgets[color], self.data[color]
             )
 
     def _update_preview(self, change):

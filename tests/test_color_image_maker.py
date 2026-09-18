@@ -78,25 +78,25 @@ def test_construction_loads_images(maker):
     This is the call that failed with ``'ImageWidget' object has no
     attribute 'load_array'`` after astrowidgets 0.6 changed its viewer
     API. Each viewer must end up with the level slider's cuts rather than
-    the viewer's default, a linear stretch, and scaled data at both the
-    reduced and the full size; the object name comes from the header.
+    the viewer's default, a linear stretch, and the reduced image to show;
+    the frames stay at full size and the object name comes from the
+    header.
     """
     assert maker.object_name == "m 101"
-    for color in ["red", "green", "blue"]:
+    for color in COLORS:
         viewer = maker.image_widgets[color]
         # The cuts come from the level slider, not the viewer's default.
         assert isinstance(viewer.get_cuts(), ManualInterval)
         assert isinstance(viewer.get_stretch(), LinearStretch)
         assert maker.sc_raw[color].shape == REDUCED_SHAPE
-        assert maker.sc_raw_f[color].shape == IMAGE_SHAPE
+        assert maker.data_raw_unmod[color].shape == IMAGE_SHAPE
 
 
 def test_level_slider_sets_cuts(maker):
     """Moving one channel's level slider sets that viewer's cuts.
 
-    The scaled data for that channel, at both the reduced and the full
-    size, is recomputed with the new cuts, and the other channels are
-    left alone.
+    The scaled data for that channel is recomputed with the new cuts,
+    and the other channels are left alone.
     """
     green_before = maker.sc_raw["green"].copy()
     red_before = maker.sc_raw["red"].copy()
@@ -107,7 +107,6 @@ def test_level_slider_sets_cuts(maker):
     assert (cuts.vmin, cuts.vmax) == (200.0, 900.0)
     assert not np.allclose(red_before, maker.sc_raw["red"])
     assert maker.sc_raw["red"].shape == REDUCED_SHAPE
-    assert maker.sc_raw_f["red"].shape == IMAGE_SHAPE
     # Only the red channel should have been touched.
     np.testing.assert_array_equal(green_before, maker.sc_raw["green"])
 
@@ -120,17 +119,15 @@ def test_stretch_chooser_sets_stretch(maker, name, stretch_class):
 
     The dropdown holds names, but astrowidgets 0.6 only accepts stretch
     objects, so each name must map to the right class. The scaled data
-    used for the colour image, reduced and full size, must change too.
+    used for the colour image must change too.
     """
     before = {c: maker.sc_raw[c].copy() for c in maker.image_widgets}
-    before_full = maker.sc_raw_f["blue"].copy()
 
     maker.stretch_chooser.value = name
 
     for color, viewer in maker.image_widgets.items():
         assert isinstance(viewer.get_stretch(), stretch_class)
         assert not np.allclose(before[color], maker.sc_raw[color])
-    assert not np.allclose(before_full, maker.sc_raw_f["blue"])
 
 
 def test_background_subtraction_keeps_cuts_and_stretch(maker):
@@ -158,12 +155,12 @@ def test_background_subtraction_keeps_cuts_and_stretch(maker):
 
 
 def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch):
-    """The save tab renders the full-size image and writes it as a PNG.
+    """The save tab shows a small PNG and writes the full size one.
 
-    Selecting the tab builds the full resolution colour image, and the
-    save button writes it to the cwd under a name made from the object
-    name and the text the user typed. The PNG has the full image size,
-    not the reduced preview size.
+    Selecting the tab builds the full resolution colour image and shows a
+    reduced PNG of it, rather than drawing the whole thing as a figure.
+    The save button writes it to the cwd under a name made from the
+    object name and the text the user typed, at the full image size.
     """
     # The image is saved relative to the cwd.
     monkeypatch.chdir(tmp_path)
@@ -173,6 +170,10 @@ def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch
     maker.widget.selected_index = 2
 
     filename_input, button_row = maker.widget.children[2].children[:2]
+    shown = Image.open(io.BytesIO(maker.widget.children[2].children[3].value))
+    assert shown.format == "PNG"
+    assert shown.size == (IMAGE_SHAPE[1] // 4, IMAGE_SHAPE[0] // 4)
+
     filename_input.value = "test"
     button_row.children[0].click()
 
