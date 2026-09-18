@@ -65,6 +65,11 @@ SELECTION_FILE_NAME = 'image_selection.json'
 # so that they survive from one session to the next.
 QUALITY_FILE_NAME = 'image_quality.json'
 
+# Changed whenever the way frames are summarized changes, so that a cache
+# written by an older version is measured again rather than trusted. Version
+# 2 compares a frame only with the frames taken through the same filter.
+QUALITY_CACHE_VERSION = 2
+
 # Cutout PNGs live in the thumbnail directory beside the thumbnails, named
 # <stem of the FITS file>_star<n>.png.
 _CUTOUT_PNG_PATTERN = re.compile(r'^(?P<stem>.+)_star\d+\.png$')
@@ -419,13 +424,39 @@ def _metrics_summary_html(fname, metrics):
         if rel_flux is not None:
             brightness = _flag_span('{:.2f}&times;'.format(rel_flux),
                                     metrics.get('flux_flag'))
-            lines.append(f'Brightness vs. the night: {brightness}')
+            lines.append(f'Star brightness vs. {_compared_with(metrics)}: '
+                         f'{brightness}')
         lines.append('Stars measured: {}'.format(metrics.get('n_stars', 0)))
         if metrics.get('fwhm_flag'):
-            lines.append('<i>Stars are broader here than in most frames.</i>')
+            lines.append(f'<i>Stars are broader here than in most '
+                         f'{_compared_with(metrics)}.</i>')
         if metrics.get('flux_flag'):
-            lines.append('<i>Stars are fainter here than in most frames.</i>')
+            lines.append(f'<i>Stars are fainter here than in most '
+                         f'{_compared_with(metrics)}.</i>')
     return '<br>'.join(lines)
+
+
+def _compared_with(metrics):
+    """
+    Words for the frames that one frame's measurements are compared with.
+
+    Parameters
+    ----------
+    metrics : dict
+        One frame's entry from
+        :func:`~astro_notebooks.image_quality.summarize_metrics`.
+
+    Returns
+    -------
+    str
+        ``'the 5 B frames'`` for a frame in a group of five taken through
+        the B filter, or ``'the 5 frames'`` when the group has no name.
+    """
+    group = metrics.get('group')
+    n_group = metrics.get('n_group')
+    count = f'{n_group} ' if n_group else ''
+    name = f'{html.escape(str(group))} ' if group is not None else ''
+    return f'the {count}{name}frames'
 
 
 def _flag_span(text, flagged):
@@ -503,10 +534,10 @@ class ImageWithSelector(ipw.VBox):
             self._quality.value = 'FWHM: n/a'
         else:
             flagged = bool(metrics.get('fwhm_flag') or metrics.get('flux_flag'))
-            text = f'FWHM: {metrics["fwhm"]:.2f} px'
+            text = f'FWHM {metrics["fwhm"]:.2f} px'
             rel_flux = metrics.get('rel_flux')
             if rel_flux is not None:
-                text += f' &middot; {rel_flux:.2f}&times;'
+                text += f' &middot; flux {rel_flux:.2f}&times;'
             self._quality.value = _flag_span(text, flagged)
 
         if cutout_png:
@@ -902,8 +933,30 @@ class ImageSelect(ipw.VBox):
             measured = {}
 
         if cached is None:
-            self.metrics = summarize_metrics(measured) if measured else {}
+            self.metrics = (summarize_metrics(measured,
+                                              groups=self._frame_filters())
+                            if measured else {})
             self._write_quality_cache()
+
+    def _frame_filters(self):
+        """
+        The filter each frame was taken through.
+
+        Returns
+        -------
+        dict
+            Maps file name to the value of the frame's ``FILTER`` keyword,
+            or to None for a frame that has none. Frames are only compared
+            with others taken through the same filter.
+        """
+        table = self._collection.summary
+        if table is None or 'filter' not in table.colnames:
+            return {}
+        filters = {}
+        for fname, value in zip(table['file'], table['filter']):
+            masked = np.ma.is_masked(value)
+            filters[Path(str(fname)).name] = None if masked else str(value)
+        return filters
 
     def _run_jobs(self, thumbnail_todo, measure_todo, thumb_dir):
         """Run the thumbnail and measurement jobs behind a progress bar."""
@@ -983,6 +1036,8 @@ class ImageSelect(ipw.VBox):
 
         if not isinstance(cached, dict):
             return None
+        if cached.get('version') != QUALITY_CACHE_VERSION:
+            return None
         if cached.get('cutout_size') != self._cutout_size:
             return None
 
@@ -1015,6 +1070,7 @@ class ImageSelect(ipw.VBox):
                 return
         try:
             _atomic_write_json(self.quality_path, {
+                'version': QUALITY_CACHE_VERSION,
                 'cutout_size': self._cutout_size,
                 'stars': [list(star) for star in self.star_positions],
                 'mtimes': mtimes,

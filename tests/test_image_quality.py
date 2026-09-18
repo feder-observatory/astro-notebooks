@@ -1,7 +1,10 @@
+import json
 import os
 
+import ipywidgets as ipw
 import numpy as np
 import pytest
+from astropy.io import fits
 
 from astro_notebooks.image_quality import (
     FWHM_PER_SIGMA,
@@ -11,7 +14,7 @@ from astro_notebooks.image_quality import (
     select_reference_stars,
     summarize_metrics,
 )
-from astro_notebooks.image_selector import ImageSelect
+from astro_notebooks.image_selector import QUALITY_CACHE_VERSION, ImageSelect
 
 from .conftest import (
     BROAD_FRAME,
@@ -318,6 +321,65 @@ def test_summarize_metrics_frame_with_one_bad_star_is_still_measured():
     assert summary['frame0.fit']['rel_flux'] == pytest.approx(1.0)
 
 
+def test_summarize_metrics_compares_only_within_a_group():
+    """A frame is compared with the frames of its own filter, not with all.
+
+    Four B frames whose stars are 0.4 times as bright as those of six V
+    frames, plus one dim and one broad B frame. Without groups every B
+    frame would be flagged as faint; with them the ordinary B frames read
+    1.0 and only the two odd B frames are flagged, each for its own reason.
+    Every entry also records its group and how many frames are in it.
+    """
+    per_frame = {}
+    groups = {}
+    for i in range(6):
+        per_frame[f'v{i}.fit'] = _fake_stars([4.0, 4.0], [250.0, 500.0])
+    for i in range(4):
+        per_frame[f'b{i}.fit'] = _fake_stars([5.0, 5.0], [100.0, 200.0])
+    per_frame['b-dim.fit'] = _fake_stars([5.0, 5.0], [50.0, 100.0])
+    per_frame['b-fat.fit'] = _fake_stars([7.5, 7.5], [100.0, 200.0])
+    for name in per_frame:
+        groups[name] = 'V' if name.startswith('v') else 'B'
+
+    ungrouped = summarize_metrics(per_frame)
+    assert ungrouped['b0.fit']['flux_flag']
+
+    summary = summarize_metrics(per_frame, groups=groups)
+
+    assert list(summary) == list(per_frame)
+    assert summary['b0.fit']['rel_flux'] == pytest.approx(1.0)
+    assert summary['v0.fit']['rel_flux'] == pytest.approx(1.0)
+    assert summary['b-dim.fit']['rel_flux'] == pytest.approx(0.5)
+    assert {n for n, m in summary.items() if m['flux_flag']} == {'b-dim.fit'}
+    assert {n for n, m in summary.items() if m['fwhm_flag']} == {'b-fat.fit'}
+    assert summary['b0.fit']['group'] == 'B'
+    assert summary['b0.fit']['n_group'] == 6
+    assert summary['v0.fit']['group'] == 'V'
+    assert summary['v0.fit']['n_group'] == 6
+
+
+def test_summarize_metrics_lone_frame_in_a_group_is_not_flagged():
+    """The only frame through a filter has nothing to be compared with.
+
+    Its relative flux is 1 and it is not flagged, however faint or broad
+    its stars are next to the frames of the other filter. A frame missing
+    from ``groups`` lands in the group ``None`` rather than raising.
+    """
+    per_frame = {
+        f'v{i}.fit': _fake_stars([4.0, 4.0], [200.0, 400.0]) for i in range(4)
+    }
+    per_frame['only-b.fit'] = _fake_stars([9.0, 9.0], [10.0, 20.0])
+    groups = {f'v{i}.fit': 'V' for i in range(4)}
+
+    summary = summarize_metrics(per_frame, groups=groups)
+
+    lone = summary['only-b.fit']
+    assert lone['group'] is None
+    assert lone['n_group'] == 1
+    assert lone['rel_flux'] == pytest.approx(1.0)
+    assert not lone['fwhm_flag'] and not lone['flux_flag']
+
+
 def test_summarize_metrics_of_nothing():
     """No frames gives an empty summary rather than an error.
 
@@ -439,3 +501,79 @@ def test_no_stars_means_no_metrics(fits_dir, viewer_factory):
     assert isel.quality_path.exists()
     for tile in isel._selectors:
         assert tile._quality.value == "FWHM: n/a"
+
+
+@pytest.fixture
+def two_filter_dir(tmp_path, monkeypatch):
+    """Registered frames of one star field through two filters.
+
+    Four ``V`` frames and four ``B`` frames whose stars are 0.45 times as
+    bright, which is what a fainter filter looks like. One more ``B`` frame
+    is dimmer still, at 0.45 times the other ``B`` frames. Each file has its
+    filter in the ``FILTER`` keyword.
+    """
+    data_dir = tmp_path / "two-filters"
+    data_dir.mkdir()
+    b_fluxes = tuple(0.45 * f for f in STAR_FLUXES)
+    for i in range(4):
+        write_star_image(data_dir / f"field-{i}-V.fit", seed=i)
+        write_star_image(data_dir / f"field-{i}-B.fit", seed=10 + i,
+                         fluxes=b_fluxes)
+    write_star_image(data_dir / "field-cloud-B.fit", seed=20,
+                     fluxes=tuple(0.45 * f for f in b_fluxes))
+    for path in data_dir.glob("*.fit"):
+        fits.setval(path, "FILTER", value=path.stem.rsplit("-", 1)[1])
+    monkeypatch.chdir(tmp_path)
+    return data_dir
+
+
+def test_fainter_filter_is_not_flagged(two_filter_dir, viewer_factory):
+    """Frames through a fainter filter are not all flagged as poor.
+
+    End to end through ``ImageSelect``, which reads each frame's filter
+    from its header: the ordinary ``B`` frames read about 1.0 rather than
+    0.45 and are not flagged, while the one genuinely dim ``B`` frame
+    still is. The details panel names the frames it was compared with.
+    """
+    isel = ImageSelect(directory=two_filter_dir,
+                       viewer_factory=viewer_factory)
+    metrics = isel.metrics
+
+    assert metrics['field-0-B.fit']['group'] == 'B'
+    assert metrics['field-0-B.fit']['n_group'] == 5
+    assert metrics['field-0-V.fit']['n_group'] == 4
+    assert metrics['field-0-B.fit']['rel_flux'] == pytest.approx(1.0, rel=0.1)
+    assert metrics['field-cloud-B.fit']['rel_flux'] == pytest.approx(0.45,
+                                                                     rel=0.1)
+    flagged = {n for n, m in metrics.items()
+               if m['flux_flag'] or m['fwhm_flag']}
+    assert flagged == {'field-cloud-B.fit'}
+
+    isel.show_frame('field-cloud-B.fit')
+    details = ' '.join(w.value for w in isel.details.children
+                       if isinstance(w, ipw.HTML))
+    assert 'the 5 B frames' in details
+
+
+def test_cache_from_before_filter_grouping_is_remeasured(two_filter_dir,
+                                                         viewer_factory):
+    """A cache written before frames were grouped by filter is not trusted.
+
+    Such a cache has no ``version`` and holds flags from comparing every
+    frame with every other. The widget must measure again, so that the
+    wrong flags disappear, and write the new version into the cache.
+    """
+    isel = ImageSelect(directory=two_filter_dir,
+                       viewer_factory=viewer_factory)
+    cache = json.loads(isel.quality_path.read_text())
+    assert cache['version'] == QUALITY_CACHE_VERSION
+
+    del cache['version']
+    cache['metrics']['field-0-B.fit']['flux_flag'] = True
+    isel.quality_path.write_text(json.dumps(cache))
+
+    again = ImageSelect(directory=two_filter_dir,
+                        viewer_factory=viewer_factory)
+    assert not again.metrics['field-0-B.fit']['flux_flag']
+    rewritten = json.loads(isel.quality_path.read_text())
+    assert rewritten['version'] == QUALITY_CACHE_VERSION

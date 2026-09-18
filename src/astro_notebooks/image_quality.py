@@ -12,8 +12,9 @@ The work is split into three steps:
    the same stars are in (very nearly) the same place on every frame.
 2. :func:`measure_frame` fits a Gaussian to each of those stars on one
    frame and returns its FWHM, ellipticity and flux.
-3. :func:`summarize_metrics` compares the frames with each other and flags
-   the ones whose stars are broader or fainter than the night's median.
+3. :func:`summarize_metrics` compares the frames taken through the same
+   filter with each other and flags the ones whose stars are broader or
+   fainter than the median for that filter.
 
 Everything that touches a file reads only small cutouts through
 ``hdu.section``: a whole 4096 x 4096 frame is never held in memory.
@@ -436,6 +437,7 @@ def _nan_median(values):
 
 
 def summarize_metrics(per_frame, *,
+                      groups=None,
                       max_failures=2,
                       n_mad=3.0,
                       min_fwhm_ratio=1.15,
@@ -447,24 +449,80 @@ def summarize_metrics(per_frame, *,
     per_frame : dict
         Maps file name to the list of per-star dicts returned by
         :func:`measure_frame`, in the same star order for every frame.
+    groups : dict, optional
+        Maps file name to the group the frame belongs to, normally its
+        filter. A frame is only ever compared with the other frames of its
+        own group: a star is much fainter through one filter than through
+        another, and is often a different width too, so comparing across
+        filters would flag every frame taken through the faintest one. A
+        frame missing from ``groups`` is in the group ``None``. By default
+        all of the frames form a single group.
+    max_failures, n_mad, min_fwhm_ratio, min_rel_flux
+        Thresholds, applied within each group; see `_summarize_group`.
+
+    Returns
+    -------
+    dict
+        Keyed by file name, in the order of ``per_frame``. Each value is
+        the JSON friendly dict described in `_summarize_group`, plus
+        ``group`` (the frame's group) and ``n_group`` (how many frames are
+        in that group, this one included).
+
+    Notes
+    -----
+    A group of one frame has nothing to be compared with, so its relative
+    flux is 1 and it is never flagged. Nothing is done about frames of
+    different exposure times within a group.
+    """
+    groups = groups or {}
+    members = {}
+    for name in per_frame:
+        members.setdefault(groups.get(name), []).append(name)
+
+    summary = {}
+    for group, names in members.items():
+        group_summary = _summarize_group(
+            {name: per_frame[name] for name in names},
+            max_failures=max_failures, n_mad=n_mad,
+            min_fwhm_ratio=min_fwhm_ratio, min_rel_flux=min_rel_flux)
+        for entry in group_summary.values():
+            entry['group'] = group
+            entry['n_group'] = len(names)
+        summary.update(group_summary)
+
+    return {name: summary[name] for name in per_frame}
+
+
+def _summarize_group(per_frame, *, max_failures, n_mad, min_fwhm_ratio,
+                     min_rel_flux):
+    """Summarize frames that can be compared with each other.
+
+    Parameters
+    ----------
+    per_frame : dict
+        Maps file name to the list of per-star dicts returned by
+        :func:`measure_frame`, in the same star order for every frame.
     max_failures : int
         A star that could not be measured on more than this many frames is
         left out of every frame's summary.
     n_mad : float
         A frame is flagged when its FWHM is more than this many (scaled)
-        median absolute deviations above the night's median FWHM.
+        median absolute deviations above the group's median FWHM.
     min_fwhm_ratio : float
         ... and also at least this much larger than the median, so that a
-        night of nearly identical frames does not flag its own noise.
+        group of nearly identical frames does not flag its own noise.
     min_rel_flux : float
         A frame is flagged when its stars are fainter than this fraction of
-        their median brightness over the night.
+        their median brightness over the group.
 
-    Returns a dict keyed by file name whose values are JSON friendly:
-    ``fwhm``, ``ellipticity`` and ``rel_flux`` (floats, or None when there
-    is nothing to report), the per-star lists ``star_fwhm`` and
-    ``star_rel_flux``, the booleans ``fwhm_flag`` and ``flux_flag``, and
-    ``n_stars``.
+    Returns
+    -------
+    dict
+        Keyed by file name, with JSON friendly values: ``fwhm``,
+        ``ellipticity`` and ``rel_flux`` (floats, or None when there is
+        nothing to report), the per-star lists ``star_fwhm`` and
+        ``star_rel_flux``, the booleans ``fwhm_flag`` and ``flux_flag``,
+        and ``n_stars``.
     """
     names = list(per_frame)
     if not names:
