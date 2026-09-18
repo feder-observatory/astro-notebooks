@@ -500,7 +500,10 @@ class ColorImageMaker:
         for color, slider in zip(
             self._colors, [self.r_slider, self.g_slider, self.b_slider]
         ):
-            slider.observe(self._make_mix_observer(color), names='value')
+            slider.observe(
+                lambda change, color=color: self._remake_preview(color),
+                names='value',
+            )
         self.subtract_bkgd_checkbox.observe(self._on_subtract_change, names='value')
 
     def _build_save_tab(self):
@@ -747,32 +750,26 @@ class ColorImageMaker:
             colour of the preview.
         """
         def observer(change):
-            minval, maxval = change['new']
-            self.image_widgets[color].set_cuts(ManualInterval(minval, maxval))
-            self.preview_planes.pop(color, None)
-            self._update_preview()
+            self.image_widgets[color].set_cuts(ManualInterval(*change['new']))
+            self._remake_preview(color)
         return observer
 
-    def _make_mix_observer(self, color):
+    def _remake_preview(self, *colors):
         """
-        Make the observer for one colour's slider in the mixer.
+        Make some colours of the preview again and redraw it.
+
+        The cuts, the stretch, the background and the weight in the mix
+        are all applied before the image is averaged, so a change to any
+        of them means another pass over the frame.
 
         Parameters
         ----------
-        color : str
-            One of `COLORS`.
-
-        Returns
-        -------
-        callable
-            Observer that remakes that colour of the preview. The weight
-            is applied before the image is averaged, so the plane really
-            does have to be made again from the frame.
+        *colors : str
+            The colours, from `COLORS`, whose planes are out of date.
         """
-        def observer(change):
+        for color in colors:
             self.preview_planes.pop(color, None)
-            self._update_preview()
-        return observer
+        self._update_preview()
 
     def _stretch_observer(self, change):
         """
@@ -785,22 +782,14 @@ class ColorImageMaker:
         """
         for color in self._colors:
             self.image_widgets[color].set_stretch(self._stretches[change['new']])
-        self.preview_planes.clear()
-        self._update_preview()
+        self._remake_preview(*self._colors)
 
-    def _update_preview(self, change=None):
-        """
-        Draw the colour preview from the three planes.
-
-        Parameters
-        ----------
-        change : dict, optional
-            Ignored; lets this be used as an observer.
-        """
+    def _update_preview(self):
+        """Draw the colour preview from the three planes."""
         comb = np.stack([self._preview_plane(c) for c in self._colors], axis=-1)
         maxes = [round(float(comb[:, :, i].max()), 3) for i in range(3)]
         max_img = max(maxes)
-        r, g, b = (self._weights()[c] for c in self._colors)
+        r, g, b = self._weights().values()
         with self.preview_output:
             self.preview_output.clear_output(wait=True)
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -846,8 +835,7 @@ class ColorImageMaker:
             self.image_widgets[color].set_stretch(
                 self._stretches[self.stretch_chooser.value]
             )
-        self.preview_planes.clear()
-        self._update_preview()
+        self._remake_preview(*self._colors)
 
     # ------------------------------------------------------------------
     # Jupyter display
