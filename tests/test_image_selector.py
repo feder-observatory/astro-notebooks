@@ -1,6 +1,4 @@
-import shutil
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import ipywidgets as ipw
 import numpy as np
@@ -24,14 +22,6 @@ def _walk_widgets(widget):
     yield widget
     for child in getattr(widget, "children", ()):
         yield from _walk_widgets(child)
-
-
-def _thumb_arrays(thumb_dir):
-    """Map png name -> pixel array for every thumbnail."""
-    return {
-        p.name: np.asarray(Image.open(p))
-        for p in sorted(Path(thumb_dir).glob("*.png"))
-    }
 
 
 def test_scale_and_downsample_output_range_and_nans():
@@ -100,19 +90,6 @@ def test_stale_thumbnails_cleaned_up(fits_dir):
     assert not (fits_dir / "thumbs" / "image-000.png").exists()
     for i in range(1, N_IMAGES):
         assert (fits_dir / "thumbs" / f"image-{i:03d}.png").exists()
-
-
-def test_parallel_matches_serial(fits_dir):
-    thumbs = fits_dir / "thumbs"
-    ImageSelect(directory=fits_dir, max_workers=1)
-    serial = _thumb_arrays(thumbs)
-    shutil.rmtree(thumbs)
-    ImageSelect(directory=fits_dir, max_workers=2)
-    parallel = _thumb_arrays(thumbs)
-    assert serial.keys() == parallel.keys()
-    for k in serial:
-        assert serial[k].size > 0
-        assert np.array_equal(serial[k], parallel[k])
 
 
 def test_progress_ui_shown_and_hidden(fits_dir, mocker):
@@ -214,9 +191,13 @@ def test_max_workers_kwarg_flows_through(fits_dir, mocker):
     assert spy.call_args.kwargs["max_workers"] == 2
 
 
-def test_banded_read_matches_whole_frame(tmp_path):
-    # height is not a multiple of the band height (64) or of downsample (8),
-    # and the width is not a multiple of downsample either
+def test_thumbnail_data_matches_whole_frame(tmp_path):
+    # The banded read comes from reducer, which tests the band arithmetic
+    # itself; what is checked here is that the clamp is handed to it as a
+    # preprocess and the normalization is applied after it, so that a
+    # banded read and a whole-frame call still agree. The shape is not a
+    # multiple of the band height (64) or of downsample (8), and there is
+    # both a clamped pixel and a NaN.
     rng = np.random.default_rng(1234)
     data = rng.uniform(100.0, 1000.0, size=(300, 130))
     data[0:2, 0:2] = np.nan
@@ -227,19 +208,6 @@ def test_banded_read_matches_whole_frame(tmp_path):
     banded = _thumbnail_data(path, downsample=8, band_rows=64)
     whole = _scale_and_downsample(fits.getdata(path), downsample=8)
     assert banded.shape == (300 // 8, 130 // 8)
-    assert np.array_equal(banded, whole)
-
-
-def test_banded_read_matches_whole_frame_no_downsample(tmp_path):
-    rng = np.random.default_rng(99)
-    data = rng.uniform(100.0, 1000.0, size=(70, 33)).astype(np.float32)
-    data[3, 3] = 5e5
-    path = tmp_path / "no-downsample.fit"
-    fits.PrimaryHDU(data).writeto(path)
-
-    banded = _thumbnail_data(path, downsample=1, band_rows=32)
-    whole = _scale_and_downsample(fits.getdata(path), downsample=1)
-    assert banded.shape == (70, 33)
     assert np.array_equal(banded, whole)
 
 

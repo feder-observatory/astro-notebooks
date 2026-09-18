@@ -10,6 +10,7 @@ from astropy.visualization import simple_norm
 from ccdproc import ImageFileCollection
 from IPython.display import display
 from PIL import Image
+from reducer.image_browser import banded_block_reduce
 
 try:
     from stellarphot.gui.custom_widgets import Spinner
@@ -35,33 +36,18 @@ class _MessageSpinner(ipw.VBox):
         self.layout.display = "none"
 
 
-# Rough number of image rows to read from disk at a time. The real band
-# height is rounded down to a multiple of the downsampling factor so that
-# block_reduce only ever trims a partial block in the very last band, which
-# is exactly what it would do for a whole-frame call.
-_TARGET_BAND_ROWS = 256
-
-
-def _band_height(downsample, target_rows=_TARGET_BAND_ROWS):
-    """Number of rows to read at a time, a multiple of ``downsample``."""
-    if downsample <= 1:
-        return max(int(target_rows), 1)
-    return max(downsample, (int(target_rows) // downsample) * downsample)
-
-
-def _clamp_and_reduce(data, downsample):
-    """Clamp bright pixels and block-average one band (or a whole frame).
+def _clamp(data):
+    """Clamp very bright pixels, as a float32 copy of the input.
 
     The input is never modified. The result is float32, which keeps the
-    memory used by the band small; ``block_reduce`` trims any partial
-    block at the end of each axis.
+    memory used by a band of a big image small. This is used both on a
+    whole frame and, as the ``preprocess`` argument of
+    :func:`~reducer.image_browser.banded_block_reduce`, on one band at a
+    time.
     """
     # float32 copy: small, short lived, and never a view on the caller's data
     scaled_data = np.asarray(data).astype(np.float32)
     scaled_data[scaled_data > 1e5] = 1e5
-    if downsample > 1:
-        scaled_data = block_reduce(scaled_data,
-                                   block_size=(downsample, downsample))
     return scaled_data
 
 
@@ -84,11 +70,15 @@ def _scale_and_downsample(data, downsample=8,
                          max_percent=99.5):
     """Clamp, downsample and normalize an in-memory image.
 
-    This is the whole-frame version of :func:`_thumbnail_data`; both share
-    :func:`_clamp_and_reduce` and :func:`_normalize`, so they return
-    identical arrays for the same image.
+    This is the whole-frame version of :func:`_thumbnail_data`; both clamp
+    with :func:`_clamp` and normalize with :func:`_normalize`, so they
+    return identical arrays for the same image.
     """
-    return _normalize(_clamp_and_reduce(data, downsample),
+    scaled_data = _clamp(data)
+    if downsample > 1:
+        scaled_data = block_reduce(scaled_data,
+                                   block_size=(downsample, downsample))
+    return _normalize(scaled_data,
                       min_percent=min_percent,
                       max_percent=max_percent)
 
@@ -107,25 +97,19 @@ def _thumbnail_data(fits_path, downsample=8,
                     band_rows=None):
     """Downsampled, normalized image data read a band of rows at a time.
 
-    Only ``band_rows`` rows of the image are in memory at once, so a full
+    The banded read itself is
+    :func:`~reducer.image_browser.banded_block_reduce`, which reads only a
+    band of rows at a time and clamps each band as it is read, so a full
     frame (and in particular a full float64 copy of one) is never made.
+    Its result is identical to downsampling the whole frame, so this
+    returns the same array as :func:`_scale_and_downsample` does for the
+    same image.
     """
-    band = _band_height(downsample, band_rows or _TARGET_BAND_ROWS)
-
-    reduced = []
     with fits.open(fits_path, memmap=True) as hdul:
-        hdu = _image_hdu(hdul)
-        n_rows = hdu.shape[0]
-        for row0 in range(0, n_rows, band):
-            row1 = min(row0 + band, n_rows)
-            if downsample > 1 and (row1 - row0) < downsample:
-                # block_reduce would trim these rows away anyway
-                break
-            # hdu.section reads only these rows from disk
-            reduced.append(_clamp_and_reduce(hdu.section[row0:row1, :],
-                                             downsample))
+        small = banded_block_reduce(_image_hdu(hdul), downsample,
+                                    band_rows=band_rows,
+                                    preprocess=_clamp)
 
-    small = np.concatenate(reduced, axis=0)
     return _normalize(small,
                       min_percent=min_percent,
                       max_percent=max_percent)
