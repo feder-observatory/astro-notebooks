@@ -578,7 +578,15 @@ class ColorImageMaker:
     # ------------------------------------------------------------------
 
     def _load_data(self):
-        """Load FITS files, compute backgrounds, populate data dicts, init observers."""
+        """
+        Read the three frames and set up everything made from them.
+
+        The frames are read, the pixels missing from any one of them are
+        blanked in all three, and each is averaged over blocks for the
+        viewer on the first tab. Nothing at full size is worked out here:
+        the preview is made the first time it is drawn, and the image
+        that gets saved when the Save tab is opened.
+        """
         for color, filter_name in zip(self._colors, self._filters):
             path = os.path.join(
                 self.image_directory, f'combined_light_filter_{filter_name}.fit'
@@ -816,10 +824,32 @@ class ColorImageMaker:
             plt.show()
 
     def _on_tab_change(self, change):
+        """
+        Build the finished image when the Save tab is opened.
+
+        Parameters
+        ----------
+        change : dict
+            The traitlets change, whose ``'new'`` is the tab now shown.
+        """
         if change['new'] == 2:
             self._refresh_save()
 
     def _on_subtract_change(self, change):
+        """
+        Take the sky background off the images, or put it back.
+
+        The backgrounds are fitted the first time the box is ticked.
+        Every colour of the preview changes, and so do the images the
+        viewers show, which are reloaded without losing the cuts and the
+        stretch already chosen.
+
+        Parameters
+        ----------
+        change : dict
+            The traitlets change, whose ``'new'`` says whether the box is
+            now ticked.
+        """
         if not self.data_sm_raw:
             return
         if change['new'] and not self.bkgd_sm:
