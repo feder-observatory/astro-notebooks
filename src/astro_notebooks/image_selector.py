@@ -1080,6 +1080,7 @@ class ImageSelect(ipw.VBox):
             self._click_events.append(event)
 
     def _clicked(self, index, _event):
+        """Show the frame whose thumbnail was clicked; called by ipyevents."""
         self._show_frame(index)
 
     def show_frame(self, name):

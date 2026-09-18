@@ -694,6 +694,12 @@ def test_selected_combiner_rejects_image_source_argument(combine_dirs):
 
 def test_click_shows_frame_in_viewer(star_fits_dir, viewer_factory,
                                      mock_viewer):
+    """Showing a frame loads that file into the viewer and describes it.
+
+    ``_show_frame`` is what a click on a thumbnail calls. The details
+    panel under the viewer must name the frame and give its FWHM, so the
+    user can tell which frame they are looking at.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     w._show_frame(2)
     mock_viewer.load_image.assert_called_once_with(
@@ -706,6 +712,11 @@ def test_click_shows_frame_in_viewer(star_fits_dir, viewer_factory,
 
 
 def test_show_frame_by_name(star_fits_dir, viewer_factory, mock_viewer):
+    """``show_frame`` takes a file name, as found in ``selected_files``.
+
+    It is the public way to show a frame from code, and must load the
+    same file a click on that thumbnail would.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     w.show_frame("stars-004.fit")
     mock_viewer.load_image.assert_called_once_with(
@@ -716,6 +727,13 @@ def test_show_frame_by_name(star_fits_dir, viewer_factory, mock_viewer):
 def test_showing_another_frame_replaces_the_first(star_fits_dir,
                                                   viewer_factory,
                                                   mock_viewer):
+    """Each frame shown replaces the one before rather than being added to it.
+
+    The viewer keeps every image loaded under a different label, and
+    full-size frames are big enough to exhaust the memory allowed on the
+    hub, so ``load_image`` must be called with the file alone and no
+    label.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     w.show_frame("stars-000.fit")
     w.show_frame("stars-001.fit")
@@ -727,6 +745,11 @@ def test_showing_another_frame_replaces_the_first(star_fits_dir,
 
 
 def test_details_show_star_cutouts(star_fits_dir, viewer_factory):
+    """The details panel shows a close-up of every star measured on the frame.
+
+    Each is real PNG data, so the user can see for themselves why a frame
+    was flagged.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     w.show_frame("stars-000.fit")
     images = [c for c in _walk_widgets(w.details) if isinstance(c, ipw.Image)]
@@ -736,6 +759,11 @@ def test_details_show_star_cutouts(star_fits_dir, viewer_factory):
 
 
 def test_every_tile_has_a_click_event(star_fits_dir, viewer_factory):
+    """Every thumbnail has its own click event, and the widget keeps hold of them.
+
+    The ``ipyevents`` objects stop reporting clicks once they are garbage
+    collected, so they must stay referenced for the life of the widget.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     assert len(w._click_events) == len(w._selectors)
     for event, tile in zip(w._click_events, w._selectors):
@@ -744,6 +772,11 @@ def test_every_tile_has_a_click_event(star_fits_dir, viewer_factory):
 
 
 def test_tiles_show_metrics(star_fits_dir, viewer_factory):
+    """Each tile shows its FWHM and a star cutout, and only the bad frames are in red.
+
+    The red text is the whole point of the measurements: it must be on
+    the broad frame and the dim frame and on no others.
+    """
     w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     for tile in w._selectors:
         assert "FWHM" in tile._quality.value
@@ -755,6 +788,11 @@ def test_tiles_show_metrics(star_fits_dir, viewer_factory):
 
 
 def test_tiles_without_metrics_say_so(fits_dir, viewer_factory):
+    """With no stars to measure, tiles say "FWHM: n/a" and show no cutout.
+
+    An empty label would look like a bug, and a missing measurement must
+    never be mistaken for a good one.
+    """
     w = ImageSelect(directory=fits_dir, viewer_factory=viewer_factory)
     for tile in w._selectors:
         assert tile._quality.value == "FWHM: n/a"
@@ -763,6 +801,12 @@ def test_tiles_without_metrics_say_so(fits_dir, viewer_factory):
 
 def test_progress_covers_thumbnails_and_metrics(star_fits_dir, viewer_factory,
                                                 mocker):
+    """One progress bar covers both the thumbnails and the measurements.
+
+    It counts one step for each, per frame, reaches its end and is then
+    hidden. When everything is cached nothing is displayed at all, so
+    opening the notebook a second time does not flash a progress bar.
+    """
     displayed = []
     mocker.patch("astro_notebooks.image_selector.display",
                  side_effect=lambda *a, **k: displayed.extend(a))

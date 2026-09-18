@@ -272,6 +272,13 @@ def select_reference_stars(fits_path, *,
 
 
 def _nan_metrics():
+    """The measurements of a star that could not be measured.
+
+    Returns
+    -------
+    dict
+        ``fwhm``, ``ellipticity`` and ``flux``, all NaN.
+    """
     return {'fwhm': float('nan'), 'ellipticity': float('nan'),
             'flux': float('nan')}
 
@@ -410,6 +417,18 @@ def _finite_or_none(value):
 
 
 def _nan_median(values):
+    """Median of the finite values, ignoring NaN and infinity.
+
+    Parameters
+    ----------
+    values : iterable of float
+        The values; any that are not finite are left out.
+
+    Returns
+    -------
+    float
+        The median, or NaN if no value is finite.
+    """
     values = [v for v in values if np.isfinite(v)]
     if not values:
         return float('nan')
@@ -454,6 +473,7 @@ def summarize_metrics(per_frame, *,
     n_stars = max((len(per_frame[name]) for name in names), default=0)
 
     def star_value(name, index, key):
+        """One measurement of one star on one frame, NaN if there is none."""
         stars = per_frame[name]
         if index >= len(stars):
             return float('nan')
