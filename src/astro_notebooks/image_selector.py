@@ -51,11 +51,9 @@ class _Spinner(ipw.VBox):
     Hidden until `start` is called and hidden again by `stop`, so that it
     is on screen only while there is work going on.
 
-    This used to be stellarphot's ``Spinner``, which is the same widget
-    with an animated star beside the message. Importing it cost about
-    180 MB and three seconds, because it pulls in the whole of stellarphot
-    (pandas, scikit-learn, astroquery and more), which is far too much for
-    a per-user memory cap on a shared JupyterHub.
+    stellarphot has the same widget with an animated star beside the
+    message, but importing it pulls in the whole of stellarphot, which is
+    far too much for a per-user memory cap on a shared JupyterHub.
     """
 
     def __init__(self, *args, message="", **kwargs):
@@ -63,11 +61,6 @@ class _Spinner(ipw.VBox):
         self._message = ipw.HTML(message)
         self.children = [self._message]
         self.layout.display = "none"
-
-    @property
-    def message(self):
-        """Text currently shown beside the progress bar."""
-        return self._message.value
 
     def start(self):
         """Show the message."""
@@ -594,20 +587,12 @@ class ImageSelect(ipw.VBox):
         Passed on to `ipywidgets.VBox`.
     """
 
-    # Every thumbnail thread holds a band of a frame and the pages of that
-    # frame it has touched, so peak memory goes up with the size of the
-    # pool while the time saved quickly stops doing so. On ten 4096x4096
-    # frames, preparing them cold cost about 325 MB with one thread,
-    # 386 MB with two and 500 MB with four, in 3.2 s, 2.4 s and 2.1 s.
-    #
-    # Two is the useful middle. It gives back about 115 MB of a student's
-    # gigabyte for the 0.3 s that four threads saved on a ten-core laptop
-    # -- and on the class hub, where fifteen students share sixteen cores,
-    # even that 0.3 s is not really there to win. One thread would save
-    # another 60 MB or so but takes a third longer, because a second
-    # thread still overlaps the FITS reads (which release the GIL) with
-    # the work on the band already read, and that overlap is worth most
-    # when there is only one core to go round.
+    # Every thumbnail thread holds a band of a frame, so peak memory goes
+    # up with the size of the pool (about 60 MB a thread on 4096x4096
+    # frames) while the time saved quickly stops doing so. A second thread
+    # still earns its keep by overlapping the FITS reads with the work on
+    # the band already read; more than that buys little on a hub where
+    # each user has about one core.
     DEFAULT_MAX_WORKERS = 2
 
     # How tall the scrolling panel of thumbnails is, and how wide the
