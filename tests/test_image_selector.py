@@ -14,6 +14,7 @@ from astro_notebooks.image_selector import (
     SELECTION_FILE_NAME,
     ImageSelect,
     ImageWithSelector,
+    SelectedCombiner,
     _make_one_thumbnail,
     _scale_and_downsample,
     _thumbnail_data,
@@ -434,8 +435,8 @@ def test_selection_entry_with_non_boolean_value_ignored(fits_dir):
 def test_collection_from_selected_files(fits_dir):
     """``selected_files`` can be used directly to make a collection.
 
-    This is how the notebook combines only the chosen frames without
-    moving files. The chosen names must be the only files in the
+    This is how ``SelectedCombiner`` combines only the chosen frames
+    without moving files. The chosen names must be the only files in the
     collection, and must still filter by ``imagetyp``, both before and
     after a ``refresh()``, because reducer's Combiner refreshes the
     collection before using it.
@@ -481,3 +482,194 @@ def test_write_selection_manifest(fits_dir, tmp_path):
     assert manifest["excluded"] == [f"image-{i:03d}.fit" for i in (0, 4)]
     # a plain ISO timestamp
     datetime.fromisoformat(manifest["timestamp"])
+
+
+def test_write_selection_manifest_records_given_frames(fits_dir, tmp_path):
+    """``included`` makes the manifest record a snapshot, not the checkboxes.
+
+    ``SelectedCombiner`` writes the manifest after the combination, from
+    the list of frames it actually combined. A checkbox changed in the
+    meantime must not alter what the manifest says went into the result.
+    """
+    w = ImageSelect(directory=fits_dir)
+    snapshot = [f"image-{i:03d}.fit" for i in (0, 1, 2)]
+    # the live selection differs from the snapshot in both directions
+    w._selectors[0]._selector.value = False
+
+    manifest_path = write_selection_manifest(w, tmp_path / "combined",
+                                             "run_two", included=snapshot)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["included"] == snapshot
+    assert manifest["excluded"] == [f"image-{i:03d}.fit" for i in (3, 4)]
+
+
+# Pixel value of each frame made by combine_dirs. The frames are constant,
+# so the mean of their average says which of them were combined.
+COMBINE_VALUES = [1.0, 2.0, 100.0]
+
+
+@pytest.fixture
+def combine_dirs(tmp_path, monkeypatch):
+    """Data directory of three constant light frames, and an empty destination.
+
+    The frames hold 1, 2 and 100, all in filter V, so the average of the
+    first two is 1.5 and the average of all three is 34.33: the combined
+    image itself shows whether the bright frame was used. The destination
+    directory exists and is empty, as it is in the notebook.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    destination = tmp_path / "combined"
+    destination.mkdir()
+    for i, value in enumerate(COMBINE_VALUES):
+        hdu = fits.PrimaryHDU(np.full((16, 16), value, dtype="float32"))
+        hdu.header["IMAGETYP"] = "LIGHT"
+        hdu.header["FILTER"] = "V"
+        hdu.header["BUNIT"] = "adu"
+        hdu.writeto(data_dir / f"frame-{i}.fit")
+    monkeypatch.chdir(tmp_path)
+    return data_dir, destination
+
+
+def _make_selected_combiner(isel, destination):
+    """Make a ``SelectedCombiner`` the way the notebook does."""
+    return SelectedCombiner(image_select=isel,
+                            run_label="run",
+                            description="Combine light images",
+                            toggle_type="button",
+                            group_by="filter",
+                            apply_to={"imagetyp": "light"},
+                            destination=str(destination))
+
+
+def _press_go(combiner):
+    """Choose to combine, then press the combiner's go button.
+
+    Clicking the button, rather than calling ``action()``, runs the same
+    handler that a click in the browser does.
+    """
+    combiner.toggle.value = True
+    combiner._combine_method.toggle.value = True
+    combiner._go_button.click()
+
+
+def test_selected_combiner_uses_frames_checked_when_go_is_pressed(
+        combine_dirs):
+    """A frame unticked after the combiner was made is left out.
+
+    This is the bug the class exists to fix. With a plain ``Combiner``
+    given ``ImageFileCollection(filenames=isel.selected_files)``, the list
+    of frames was fixed when that notebook cell ran, so under "Run All",
+    or if the cell was run before the review was finished, unticking a
+    frame had no effect on the result. The combiner here is made while
+    every frame is checked, the bright frame is unticked afterwards, and
+    the mean of the output (1.5, not 34.33) shows it was not combined.
+    Grouping by filter is on, so this also checks that the group-by
+    widget was given the new collection.
+    """
+    data_dir, destination = combine_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_selected_combiner(isel, destination)
+
+    isel._selectors[2]._selector.value = False
+    _press_go(combiner)
+
+    combined = destination / "run_filter_V.fit"
+    assert combined.exists()
+    assert fits.getdata(combined).mean() == pytest.approx(1.5)
+    assert list(combiner.image_source.files) == ["frame-0.fit", "frame-1.fit"]
+
+
+def test_selected_combiner_writes_manifest_of_combined_frames(combine_dirs):
+    """A finished combination leaves a manifest of exactly what it used.
+
+    The manifest is written by the combiner itself once the combination
+    has succeeded, from the same snapshot of the selection, so it cannot
+    be written before the combination or disagree with it. A frame ticked
+    again after the combination must not appear in it. The path is kept
+    on the combiner and shown in the widget.
+    """
+    data_dir, destination = combine_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_selected_combiner(isel, destination)
+    assert combiner.manifest_path is None
+
+    isel._selectors[2]._selector.value = False
+    _press_go(combiner)
+    isel._selectors[2]._selector.value = True
+
+    assert combiner.manifest_path == destination / "run_manifest.json"
+    manifest = json.loads(combiner.manifest_path.read_text())
+    assert manifest["run_label"] == "run"
+    assert manifest["included"] == ["frame-0.fit", "frame-1.fit"]
+    assert manifest["excluded"] == ["frame-2.fit"]
+    assert str(combiner.manifest_path) in combiner.message
+    assert combiner._message.layout.display != "none"
+
+
+def test_selected_combiner_refuses_empty_selection(combine_dirs):
+    """With nothing checked, nothing is combined and the widget says so.
+
+    An ``ImageFileCollection`` given an empty list of file names uses
+    every file in the directory, so without this check unticking every
+    frame would combine all of them. Nothing may be written to the
+    destination, neither an image nor a manifest, and because an
+    exception raised in a button callback is easy to miss, the refusal
+    has to be a visible message in the widget.
+    """
+    data_dir, destination = combine_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_selected_combiner(isel, destination)
+
+    for selector in isel._selectors:
+        selector._selector.value = False
+    _press_go(combiner)
+
+    assert list(destination.iterdir()) == []
+    assert combiner.manifest_path is None
+    assert "No images are checked" in combiner.message
+    assert combiner._message.layout.display != "none"
+    assert combiner._message in combiner.children
+
+
+def test_selected_combiner_no_manifest_when_combine_fails(combine_dirs,
+                                                          mocker):
+    """A failed combination writes no manifest and shows the failure.
+
+    A manifest next to a missing or half-made result would claim a
+    combination that did not happen. The error is still raised, so the
+    traceback is not lost, and the manifest left by an earlier successful
+    run is no longer reported as this run's.
+    """
+    data_dir, destination = combine_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_selected_combiner(isel, destination)
+    mocker.patch("reducer.astro_gui.Combiner.action",
+                 side_effect=RuntimeError("disk full"))
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        combiner.action()
+
+    assert list(destination.iterdir()) == []
+    assert combiner.manifest_path is None
+    assert "disk full" in combiner.message
+
+
+def test_selected_combiner_rejects_image_source_argument(combine_dirs):
+    """``image_source`` and ``file_name_base`` cannot be passed in.
+
+    Both are set from the selector and the run label. Accepting a
+    collection here would bring back the fixed list of frames that this
+    class replaces, so it is an error rather than being silently ignored.
+    """
+    data_dir, destination = combine_dirs
+    isel = ImageSelect(directory=data_dir)
+    images = ImageFileCollection(location=data_dir)
+
+    with pytest.raises(TypeError, match="image_source"):
+        SelectedCombiner(image_select=isel, run_label="run",
+                         image_source=images, destination=str(destination))
+    with pytest.raises(TypeError, match="file_name_base"):
+        SelectedCombiner(image_select=isel, run_label="run",
+                         file_name_base="other", destination=str(destination))

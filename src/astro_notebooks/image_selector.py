@@ -15,6 +15,7 @@ from astropy.visualization import simple_norm
 from ccdproc import ImageFileCollection
 from IPython.display import display
 from PIL import Image
+from reducer.astro_gui import Combiner
 from reducer.image_browser import banded_block_reduce
 
 try:
@@ -46,21 +47,46 @@ class _MessageSpinner(ipw.VBox):
 SELECTION_FILE_NAME = 'image_selection.json'
 
 
-def write_selection_manifest(isel, destination, run_label):
-    """Record which frames went into a combination.
+def write_selection_manifest(isel, destination, run_label, included=None):
+    """
+    Record which frames went into a combination.
 
-    Writes ``<destination>/<run_label>_manifest.json`` describing the
-    selection held by ``isel`` (an :class:`ImageSelect`) at the moment of
-    the call, and returns the path written.
+    Parameters
+    ----------
+    isel : ImageSelect
+        The selector the frames were chosen in.
+    destination : str or pathlib.Path
+        Directory the manifest is written to. It is created if needed.
+    run_label : str
+        Base of the manifest's file name,
+        ``<destination>/<run_label>_manifest.json``.
+    included : list of str, optional
+        File names, relative to the data directory, of the frames that
+        were combined. ``None`` means the frames checked in ``isel`` at the
+        moment of the call.
 
+    Returns
+    -------
+    pathlib.Path
+        Path of the manifest that was written.
+
+    Notes
+    -----
     The manifest holds the run label, an ISO timestamp, the data directory
     the frames came from, and the ``included`` and ``excluded`` file names
     (relative to that data directory).
+
+    Pass ``included`` when the combination has already happened, as
+    :class:`SelectedCombiner` does, so that the manifest lists the frames
+    that were actually combined even if a checkbox has changed since.
     """
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
 
-    included = isel.selected_files
+    if included is None:
+        included = isel.selected_files
+    else:
+        included = list(included)
     excluded = [f for f in isel._im_file_names if f not in included]
 
     manifest = {
@@ -595,3 +621,141 @@ class ImageSelect(ipw.VBox):
                 gs[j, i] = self._selectors[index]
 
         return gs
+
+
+class SelectedCombiner(Combiner):
+    """
+    Combine the frames that are checked in an `ImageSelect`.
+
+    Parameters
+    ----------
+    *args
+        Passed on to `reducer.astro_gui.Combiner`.
+    image_select : ImageSelect
+        The selector whose checked frames are combined.
+    run_label : str
+        Base of the name of the combined image(s) and of the manifest that
+        lists the frames they were made from.
+    **kwargs
+        Passed on to `reducer.astro_gui.Combiner`, for example
+        ``description``, ``toggle_type``, ``group_by``, ``apply_to`` and
+        ``destination``. Do not pass ``image_source`` or
+        ``file_name_base``; they are set from ``image_select`` and
+        ``run_label``.
+
+    Attributes
+    ----------
+    manifest_path : pathlib.Path or None
+        Manifest written by the most recent combination, or ``None`` if
+        there has not been a successful one.
+    message : str
+        Text shown below the combine button: why nothing was combined,
+        why the combination failed, or what was combined.
+
+    Notes
+    -----
+    The frames that are combined are the ones checked *when the combine
+    button is pressed*, not the ones checked when this widget was made. A
+    plain ``Combiner`` given
+    ``ImageFileCollection(filenames=isel.selected_files)`` combines a
+    snapshot taken when that collection was made, because refreshing a
+    collection keeps its list of file names, so a frame unchecked later
+    would still be combined.
+
+    Nothing is combined if no frame is checked. This is refused here
+    because an `~ccdproc.ImageFileCollection` given an empty list of file
+    names uses every file in the directory.
+
+    When a combination finishes, `write_selection_manifest` records the
+    frames that went into it, from the same snapshot, next to the result.
+    No manifest is written if the combination fails.
+
+    Two attributes that are private to reducer are set when the button is
+    pressed: ``Combiner._image_source`` and the ``_image_source`` of the
+    combiner's group-by widget, which keeps its own reference to the
+    collection and would otherwise group the frames using the old one.
+    """
+
+    def __init__(self, *args, image_select, run_label, **kwargs):
+        """Make the widget; the parameters are in the class docstring."""
+        for reserved in ('image_source', 'file_name_base'):
+            if reserved in kwargs:
+                raise TypeError(
+                    f'{reserved} cannot be given to SelectedCombiner; it '
+                    f'is set from image_select and run_label.')
+        self._image_select = image_select
+        self._run_label = run_label
+        self.manifest_path = None
+        super().__init__(*args, file_name_base=run_label, **kwargs)
+
+        self._message = ipw.HTML()
+        self._message.layout.display = 'none'
+        self.children = list(self.children) + [self._message]
+
+    @property
+    def message(self):
+        """Text currently shown below the combine button."""
+        return self._message.value
+
+    def _show_message(self, text, error=False):
+        """
+        Show a message below the combine button, or hide it.
+
+        Parameters
+        ----------
+        text : str
+            Message to show. An empty string hides the message.
+        error : bool, optional
+            If ``True`` the message is shown in bold red.
+        """
+        if error:
+            text = f'<b style="color: #b00020">{text}</b>'
+        self._message.value = text
+        self._message.layout.display = 'flex' if text else 'none'
+
+    def action(self):
+        """
+        Combine the frames that are checked right now.
+
+        This runs when the combine button is pressed.
+
+        Raises
+        ------
+        Exception
+            Whatever the combination raised, after the failure has been
+            shown in the widget. No manifest is written in that case.
+        """
+        selected = self._image_select.selected_files
+        self.manifest_path = None
+
+        if not selected:
+            self._show_message(
+                'No images are checked, so nothing was combined. Check at '
+                'least one image, press "Unlock settings" and try again.',
+                error=True)
+            return
+
+        self._show_message('')
+        collection = ImageFileCollection(location=self._image_select.path,
+                                         filenames=selected)
+        # reducer offers no public way to replace the collection, and the
+        # group-by widget holds its own reference to it; see Notes above.
+        self._image_source = collection
+        self._group_by._image_source = collection
+
+        try:
+            super().action()
+        except Exception as err:
+            self._show_message(
+                f'The combination failed, and no manifest was written: '
+                f'{err!r}', error=True)
+            raise
+
+        self.manifest_path = write_selection_manifest(
+            self._image_select, self.destination, self._run_label,
+            included=selected)
+        n_total = len(self._image_select._im_file_names)
+        self._show_message(
+            f'Done. {len(selected)} of {n_total} images were checked when '
+            f'the button was pressed; they are listed in '
+            f'{self.manifest_path}.')
