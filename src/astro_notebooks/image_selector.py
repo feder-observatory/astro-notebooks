@@ -60,9 +60,8 @@ def write_selection_manifest(isel, destination, run_label):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
 
-    included = list(isel.selected_files)
-    included_set = set(included)
-    excluded = [f for f in isel._im_file_names if f not in included_set]
+    included = isel.selected_files
+    excluded = [f for f in isel._im_file_names if f not in included]
 
     manifest = {
         'run_label': run_label,
@@ -390,6 +389,13 @@ class ImageSelect(ipw.VBox):
         return [self.path / fname for fname in self.selected_files]
 
     def _selection_changed(self, _change):
+        """
+        Save the selection whenever a "Use image" checkbox changes.
+
+        Observer for the ``value`` trait of every tile's checkbox, attached
+        in ``__init__`` after the saved selection has been restored so that
+        restoring does not trigger a save.
+        """
         self.save_selection()
 
     def save_selection(self):
@@ -504,6 +510,12 @@ class ImageSelect(ipw.VBox):
 
         Thumbnails that no longer match an image in the directory are
         deleted first.
+
+        This is called once, from ``__init__``, which afterwards restores
+        the saved selection, starts watching the checkboxes and lays the
+        widgets out. Calling it again replaces the widgets without doing
+        any of that: the new ones are not shown, but they are what gets
+        saved, so the saved selection stops matching what is on screen.
 
         Parameters
         ----------
