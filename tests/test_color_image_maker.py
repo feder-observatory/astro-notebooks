@@ -498,3 +498,43 @@ def test_reduced_png_bytes_is_a_smaller_png(ragged_frames, cuts_and_weights):
     shown = Image.open(io.BytesIO(png))
     assert shown.format == "PNG"
     assert shown.size == (BANDED_SHAPE[1] // 4, BANDED_SHAPE[0] // 4)
+
+
+def _write_images_with_empty_edges(directory, object_name):
+    """Write combined images whose empty edges differ from filter to filter.
+
+    Reprojecting the frames of a night onto one grid leaves pixels with
+    no data around the edges, and not the same pixels in each filter.
+    Each file here is missing a different strip, and the directory is
+    returned.
+    """
+    directory.mkdir()
+    rng = np.random.default_rng(3)
+    edges = {"rp": (np.s_[:2, :]), "V": (np.s_[:, -3:]), "B": (np.s_[-1:, :])}
+    for filt in FILTERS:
+        data = rng.uniform(100.0, 1000.0, size=IMAGE_SHAPE).astype(np.float32)
+        data[edges[filt]] = np.nan
+        hdu = fits.PrimaryHDU(data)
+        hdu.header["BUNIT"] = "adu"
+        hdu.header["OBJECT"] = object_name
+        hdu.writeto(directory / f"combined_light_filter_{filt}.fit")
+    return directory
+
+
+def test_loading_blanks_pixels_missing_from_any_one_filter(tmp_path):
+    """A pixel missing from one filter is blank in all three once loaded.
+
+    The frames keep their own empty edges otherwise, and a pixel that is
+    black in the saved image because one colour has no data there must be
+    black in the preview too.
+    """
+    directory = _write_images_with_empty_edges(tmp_path / "edges", "m 101")
+
+    maker = ColorImageMaker(str(directory))
+
+    missing = np.isnan(maker.data_raw_unmod["red"])
+    # The three strips together, with no pixel counted twice.
+    assert missing.sum() == 2 * IMAGE_SHAPE[1] + 3 * IMAGE_SHAPE[0] - 6 + IMAGE_SHAPE[1] - 3
+    for color in COLORS:
+        assert maker.data_raw_unmod[color].dtype == np.float32
+        np.testing.assert_array_equal(np.isnan(maker.data_raw_unmod[color]), missing)

@@ -8,7 +8,7 @@ import matplotlib.image as mimg
 import numpy as np
 from IPython.display import display
 from PIL import Image
-from astropy.nddata import CCDData, block_reduce
+from astropy.io import fits
 from astropy.visualization import (
     LinearStretch,
     LogStretch,
@@ -365,7 +365,8 @@ class ColorImageMaker:
         ``combined_light_filter_B.fit``.
     """
 
-    _colors = ['red', 'green', 'blue']
+    _colors = COLORS
+    _filters = ['rp', 'V', 'B']
     _stretches = {
         'linear': LinearStretch(),
         'log': LogStretch(),
@@ -552,20 +553,22 @@ class ColorImageMaker:
 
     def _load_data(self):
         """Load FITS files, compute backgrounds, populate data dicts, init observers."""
-        red = CCDData.read(os.path.join(self.image_directory, 'combined_light_filter_rp.fit'))
-        greenish = CCDData.read(os.path.join(self.image_directory, 'combined_light_filter_V.fit'))
-        blue = CCDData.read(os.path.join(self.image_directory, 'combined_light_filter_B.fit'))
+        for color, filter_name in zip(self._colors, self._filters):
+            path = os.path.join(
+                self.image_directory, f'combined_light_filter_{filter_name}.fit'
+            )
+            data, header = fits.getdata(path, header=True, memmap=False)
+            # Native byte order float32: the frames are the only full size
+            # arrays kept, so they are kept in the smallest type the data
+            # came in.
+            self.data_raw_unmod[color] = np.asarray(data, dtype=np.float32)
+            if color == 'blue':
+                self.object_name = header['OBJECT']
 
-        reduce_fac = 8
-        red_sm = block_reduce(red.data, reduce_fac, func=np.mean)
-        green_sm = block_reduce(greenish.data, reduce_fac, func=np.mean)
-        blue_sm = block_reduce(blue.data, reduce_fac, func=np.mean)
+        blank_missing_pixels([self.data_raw_unmod[c] for c in self._colors])
 
-        for sm_image, color in zip([red_sm, green_sm, blue_sm], self._colors):
-            self.data_sm_raw[color] = sm_image.copy()
-
-        for raw_array, color in zip([red.data, greenish.data, blue.data], self._colors):
-            self.data_raw_unmod[color] = raw_array.copy()
+        for color in self._colors:
+            self.data_sm_raw[color] = block_mean(self.data_raw_unmod[color])
 
         self._apply_background(False)
 
@@ -578,8 +581,6 @@ class ColorImageMaker:
         # Initialise sc_raw / sc_raw_f using current slider cuts
         for color in self._colors:
             self._make_level_observer(color)(dict(new=self.level_sliders[color].value))
-
-        self.object_name = blue.header['OBJECT']
 
     def _compute_backgrounds(self):
         """Compute and store background models for all channels (called lazily)."""
