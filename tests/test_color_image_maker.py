@@ -23,6 +23,12 @@ FILTERS = ["rp", "V", "B"]
 
 
 def _write_combined_images(directory, object_name, seed=42):
+    """Write one synthetic combined image per filter into a new directory.
+
+    The files have the names and the ``OBJECT`` header that
+    ``ColorImageMaker`` expects. ``seed`` makes the pixel values differ
+    between directories, and the directory is returned.
+    """
     directory.mkdir()
     rng = np.random.default_rng(seed)
     # A gradient across the frame gives the background subtraction
@@ -45,10 +51,19 @@ def combined_dir(tmp_path):
 
 @pytest.fixture
 def maker(combined_dir):
+    """A ``ColorImageMaker`` built from the synthetic combined images."""
     return ColorImageMaker(str(combined_dir))
 
 
 def test_construction_loads_images(maker):
+    """Making the widget loads all three images into their viewers.
+
+    This is the call that failed with ``'ImageWidget' object has no
+    attribute 'load_array'`` after astrowidgets 0.6 changed its viewer
+    API. Each viewer must end up with the level slider's cuts rather than
+    the viewer's default, a linear stretch, and scaled data at both the
+    reduced and the full size; the object name comes from the header.
+    """
     assert maker.object_name == "m 101"
     for color in ["red", "green", "blue"]:
         viewer = maker.image_widgets[color]
@@ -60,6 +75,12 @@ def test_construction_loads_images(maker):
 
 
 def test_level_slider_sets_cuts(maker):
+    """Moving one channel's level slider sets that viewer's cuts.
+
+    The scaled data for that channel, at both the reduced and the full
+    size, is recomputed with the new cuts, and the other channels are
+    left alone.
+    """
     green_before = maker.sc_raw["green"].copy()
     red_before = maker.sc_raw["red"].copy()
 
@@ -78,6 +99,12 @@ def test_level_slider_sets_cuts(maker):
     "name,stretch_class", [("log", LogStretch), ("sqrt", SqrtStretch)]
 )
 def test_stretch_chooser_sets_stretch(maker, name, stretch_class):
+    """The stretch dropdown sets an astropy stretch on every viewer.
+
+    The dropdown holds names, but astrowidgets 0.6 only accepts stretch
+    objects, so each name must map to the right class. The scaled data
+    used for the colour image, reduced and full size, must change too.
+    """
     before = {c: maker.sc_raw[c].copy() for c in maker.image_widgets}
     before_full = maker.sc_raw_f["blue"].copy()
 
@@ -90,6 +117,12 @@ def test_stretch_chooser_sets_stretch(maker, name, stretch_class):
 
 
 def test_background_subtraction_keeps_cuts_and_stretch(maker):
+    """Toggling background subtraction keeps the cuts and the stretch.
+
+    Subtracting the background reloads the images into the viewers, and
+    a reload must not throw away the settings the user has already
+    chosen. Unticking the box gives back exactly the original data.
+    """
     maker.level_sliders["blue"].value = (200.0, 900.0)
     maker.stretch_chooser.value = "sqrt"
     data_before = maker.data_sm["blue"].copy()
@@ -108,6 +141,13 @@ def test_background_subtraction_keeps_cuts_and_stretch(maker):
 
 
 def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch):
+    """The save tab renders the full-size image and writes it as a PNG.
+
+    Selecting the tab builds the full resolution colour image, and the
+    save button writes it to the cwd under a name made from the object
+    name and the text the user typed. The PNG has the full image size,
+    not the reduced preview size.
+    """
     # The image is saved relative to the cwd.
     monkeypatch.chdir(tmp_path)
     maker.r_slider.value = 0.7
@@ -126,6 +166,12 @@ def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch
 
 
 def test_setting_image_directory_reloads(maker, tmp_path):
+    """Assigning ``image_directory`` loads the images from the new directory.
+
+    The object name and the image data both change, and the viewers are
+    again given the level slider's cuts, which goes through the same
+    viewer calls as construction.
+    """
     red_before = maker.data_sm["red"].copy()
     other_dir = _write_combined_images(tmp_path / "other", "ngc 7331", seed=7)
 
