@@ -797,6 +797,9 @@ class ColorImageMaker:
             ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
             ax.imshow(comb, vmin=0, vmax=1)
             plt.show()
+            # The inline backend closes the figure when it shows it; any
+            # other backend would keep one per slider move.
+            plt.close(fig)
 
     def _on_tab_change(self, change):
         """
