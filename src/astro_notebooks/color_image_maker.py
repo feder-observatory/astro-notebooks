@@ -65,7 +65,7 @@ def iter_bands(n_rows, band_rows=BAND_ROWS):
         yield start, min(start + band_rows, n_rows)
 
 
-def _block_counts(n_pixels, factor):
+def _block_counts(n_pixels):
     """
     Number of real pixels in each block along one axis of a frame.
 
@@ -73,53 +73,48 @@ def _block_counts(n_pixels, factor):
     ----------
     n_pixels : int
         Length of the axis.
-    factor : int
-        Length of a block along the axis.
 
     Returns
     -------
     `numpy.ndarray`
-        One count per block, all ``factor`` except the last, which is
+        One count per block, all `REDUCE` except the last, which is
         short if the axis does not divide evenly.
     """
-    counts = np.full(-(-n_pixels // factor), float(factor))
-    counts[-1] = n_pixels - factor * (len(counts) - 1)
+    counts = np.full(-(-n_pixels // REDUCE), float(REDUCE))
+    counts[-1] = n_pixels - REDUCE * (len(counts) - 1)
     return counts
 
 
-def block_mean_band(band, factor=REDUCE):
+def block_mean_band(band):
     """
-    Average one band of rows over blocks of ``factor`` by ``factor`` pixels.
+    Average one band of rows over blocks of `REDUCE` by `REDUCE` pixels.
 
     Parameters
     ----------
     band : `numpy.ndarray`
         The rows to average.
-    factor : int, optional
-        Pixels on a side of a block.
 
     Returns
     -------
     `numpy.ndarray`
         The mean of each block. A block that runs off the edge of the
         frame is the mean of the pixels it does have, so an axis whose
-        length is not a multiple of ``factor`` still reduces to
-        ``ceil(length / factor)`` values.
+        length is not a multiple of `REDUCE` still reduces to
+        ``ceil(length / REDUCE)`` values.
     """
     rows, cols = band.shape
-    pad_rows, pad_cols = -rows % factor, -cols % factor
+    pad_rows, pad_cols = -rows % REDUCE, -cols % REDUCE
     if pad_rows or pad_cols:
         band = np.pad(band, ((0, pad_rows), (0, pad_cols)))
-        counts = np.outer(_block_counts(rows, factor),
-                          _block_counts(cols, factor))
+        counts = np.outer(_block_counts(rows), _block_counts(cols))
     else:
-        counts = factor * factor
-    sums = band.reshape(band.shape[0] // factor, factor,
-                        band.shape[1] // factor, factor).sum(axis=(1, 3))
+        counts = REDUCE * REDUCE
+    sums = band.reshape(band.shape[0] // REDUCE, REDUCE,
+                        band.shape[1] // REDUCE, REDUCE).sum(axis=(1, 3))
     return sums / counts
 
 
-def block_mean(image, factor=REDUCE):
+def block_mean(image):
     """
     Average a whole image over blocks, a band of rows at a time.
 
@@ -132,19 +127,17 @@ def block_mean(image, factor=REDUCE):
     ----------
     image : `numpy.ndarray`
         The image to average.
-    factor : int, optional
-        Pixels on a side of a block.
 
     Returns
     -------
     `numpy.ndarray`
         The reduced image, as float32.
     """
-    out = np.empty((-(-image.shape[0] // factor), -(-image.shape[1] // factor)),
+    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
                    dtype=np.float32)
     for start, stop in iter_bands(image.shape[0]):
-        out[start // factor:-(-stop // factor)] = block_mean_band(
-            image[start:stop], factor
+        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(
+            image[start:stop]
         )
     return out
 
@@ -201,13 +194,13 @@ def blank_missing_pixels(frames):
             frame[start:stop][missing] = np.nan
 
 
-def background_band(background_sm, start, stop, n_cols, factor=REDUCE):
+def background_band(background_sm, start, stop, n_cols):
     """
     Scale rows of a reduced background back up to the size of the frame.
 
     Each value of a background fitted to the reduced image describes one
-    block of ``factor`` by ``factor`` pixels of the frame, so scaling it
-    back up is a plain repeat.
+    block of `REDUCE` by `REDUCE` pixels of the frame, so scaling it back
+    up is a plain repeat.
 
     Parameters
     ----------
@@ -218,16 +211,14 @@ def background_band(background_sm, start, stop, n_cols, factor=REDUCE):
         rows.
     n_cols : int
         Number of columns in the frame.
-    factor : int, optional
-        Pixels on a side of a block.
 
     Returns
     -------
     `numpy.ndarray`
         The background of this band, the same shape as the band.
     """
-    rows = background_sm[start // factor:-(-stop // factor)]
-    full = np.repeat(np.repeat(rows, factor, axis=0), factor, axis=1)
+    rows = background_sm[start // REDUCE:-(-stop // REDUCE)]
+    full = np.repeat(np.repeat(rows, REDUCE, axis=0), REDUCE, axis=1)
     return full[:stop - start, :n_cols]
 
 
@@ -270,12 +261,11 @@ def scaled_band(band, interval, stretch, weight, background=None):
     return values
 
 
-def preview_plane(image, interval, stretch, weight, background=None,
-                  factor=REDUCE):
+def preview_plane(image, interval, stretch, weight, background=None):
     """
     Make one colour plane of the preview from a full size frame.
 
-    The preview is the saved image seen ``factor`` times smaller, so the
+    The preview is the saved image seen `REDUCE` times smaller, so the
     cuts, the stretch, the weight and the clip are applied to every pixel
     of the frame and the result is then averaged over blocks. Averaging
     first, as the notebook used to, lifts the sky, because clipping at
@@ -294,23 +284,20 @@ def preview_plane(image, interval, stretch, weight, background=None,
         Where this colour's slider in the mixer sits, 0 to 1.
     background : `numpy.ndarray`, optional
         Background of the reduced image, to subtract from the frame.
-    factor : int, optional
-        Pixels on a side of a block.
 
     Returns
     -------
     `numpy.ndarray`
-        The plane, ``factor`` times smaller than the frame, as float32.
+        The plane, `REDUCE` times smaller than the frame, as float32.
     """
-    out = np.empty((-(-image.shape[0] // factor), -(-image.shape[1] // factor)),
+    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
                    dtype=np.float32)
     for start, stop in iter_bands(image.shape[0]):
         rows = (None if background is None
-                else background_band(background, start, stop, image.shape[1],
-                                     factor))
+                else background_band(background, start, stop, image.shape[1]))
         scaled = scaled_band(image[start:stop], interval, stretch, weight,
                              background=rows)
-        out[start // factor:-(-stop // factor)] = block_mean_band(scaled, factor)
+        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(scaled)
     return out
 
 
