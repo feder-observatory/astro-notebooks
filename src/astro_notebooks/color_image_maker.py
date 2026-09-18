@@ -7,7 +7,12 @@ import matplotlib.image as mimg
 import numpy as np
 from IPython.display import display
 from astropy.nddata import CCDData, block_reduce
-from astropy.visualization import ManualInterval
+from astropy.visualization import (
+    LinearStretch,
+    LogStretch,
+    ManualInterval,
+    SqrtStretch,
+)
 from astrowidgets.bqplot import ImageWidget
 from matplotlib import pyplot as plt
 from photutils.background import Background2D, MedianBackground, MeanBackground
@@ -27,6 +32,11 @@ class ColorImageMaker:
     """
 
     _colors = ['red', 'green', 'blue']
+    _stretches = {
+        'linear': LinearStretch(),
+        'log': LogStretch(),
+        'sqrt': SqrtStretch(),
+    }
 
     def __init__(self, image_directory):
         self._image_directory = image_directory
@@ -67,7 +77,7 @@ class ColorImageMaker:
 
         self.level_sliders = {c: self._make_level_slider() for c in self._colors}
         self.stretch_chooser = ipw.Dropdown(
-            options=['linear', 'log', 'sqrt'], description='Stretch'
+            options=list(self._stretches), description='Stretch'
         )
         self.subtract_bkgd_checkbox = ipw.Checkbox(
             value=False,
@@ -226,8 +236,10 @@ class ColorImageMaker:
         self._apply_background(False)
 
         for color in self._colors:
-            self.image_widgets[color].load_array(self.data_sm[color])
-            self.image_widgets[color].stretch = self.stretch_chooser.value
+            self.image_widgets[color].load_image(self.data_sm[color])
+            self.image_widgets[color].set_stretch(
+                self._stretches[self.stretch_chooser.value]
+            )
 
         # Initialise sc_raw / sc_raw_f using current slider cuts
         for color in self._colors:
@@ -302,12 +314,12 @@ class ColorImageMaker:
     # ------------------------------------------------------------------
 
     def _get_scaled_image_data(self, viewer, data):
-        return viewer._get_stretch()(viewer.cuts(data))
+        return viewer.get_stretch()(viewer.get_cuts()(data))
 
     def _make_level_observer(self, color):
         def observer(change):
             minval, maxval = change['new']
-            self.image_widgets[color].cuts = ManualInterval(minval, maxval)
+            self.image_widgets[color].set_cuts(ManualInterval(minval, maxval))
             self.sc_raw[color] = self._get_scaled_image_data(
                 self.image_widgets[color], self.data_sm[color]
             )
@@ -318,7 +330,7 @@ class ColorImageMaker:
 
     def _stretch_observer(self, change):
         for color in self._colors:
-            self.image_widgets[color].stretch = change['new']
+            self.image_widgets[color].set_stretch(self._stretches[change['new']])
             self.sc_raw[color] = self._get_scaled_image_data(
                 self.image_widgets[color], self.data_sm[color]
             )
@@ -343,8 +355,10 @@ class ColorImageMaker:
             self._compute_backgrounds()
         self._apply_background(change['new'])
         for color in self._colors:
-            self.image_widgets[color].load_array(self.data_sm[color])
-            self.image_widgets[color].stretch = self.stretch_chooser.value
+            self.image_widgets[color].load_image(self.data_sm[color])
+            self.image_widgets[color].set_stretch(
+                self._stretches[self.stretch_chooser.value]
+            )
             self._make_level_observer(color)(dict(new=self.level_sliders[color].value))
         self._update_preview(None)
 
