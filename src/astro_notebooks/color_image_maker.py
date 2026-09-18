@@ -634,7 +634,9 @@ class ColorImageMaker:
             if subtract:
                 self.data_sm[color] = self.data_sm_raw[color] - self.bkgd_sm[color]
             else:
-                self.data_sm[color] = self.data_sm_raw[color]
+                # A copy, so that nothing a viewer does to the image it is
+                # given can reach the one the background is fitted to.
+                self.data_sm[color] = self.data_sm_raw[color].copy()
 
     # ------------------------------------------------------------------
     # Image scaling and rendering
