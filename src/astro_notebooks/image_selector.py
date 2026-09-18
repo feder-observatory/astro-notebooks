@@ -37,13 +37,26 @@ class _MessageSpinner(ipw.VBox):
 
 
 def _clamp(data):
-    """Clamp very bright pixels, as a float32 copy of the input.
+    """
+    Clamp very bright pixels in a float32 copy of the input.
 
-    The input is never modified. The result is float32, which keeps the
-    memory used by a band of a big image small. This is used both on a
-    whole frame and, as the ``preprocess`` argument of
-    :func:`~reducer.image_browser.banded_block_reduce`, on one band at a
-    time.
+    Parameters
+    ----------
+    data : array-like
+        Image data, either a whole frame or one band of rows.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy of ``data`` as float32, with values above 1e5 set to 1e5. NaNs
+        pass through unchanged. The input is never modified.
+
+    Notes
+    -----
+    float32 keeps the memory used by a band of a big image small. This is
+    called on a whole frame by `_scale_and_downsample` and, as the
+    ``preprocess`` argument of `reducer.image_browser.banded_block_reduce`,
+    on one band at a time by `_thumbnail_data`.
     """
     # float32 copy: small, short lived, and never a view on the caller's data
     scaled_data = np.asarray(data).astype(np.float32)
@@ -52,7 +65,24 @@ def _clamp(data):
 
 
 def _normalize(scaled_data, min_percent=20, max_percent=99.5):
-    """Percentile-scale an already downsampled image and remove NaNs."""
+    """
+    Percentile-scale an already downsampled image to the range 0 to 1.
+
+    Parameters
+    ----------
+    scaled_data : numpy.ndarray
+        Clamped, downsampled image data.
+    min_percent, max_percent : float, optional
+        Percentiles of ``scaled_data`` that map to 0 and 1. Values outside
+        them are clipped.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Same shape as ``scaled_data``, values in [0, 1], NaNs replaced
+        with 0. Nothing is masked; the masked array type is what
+        `astropy.visualization.ImageNormalize` returns.
+    """
     norm = simple_norm(scaled_data,
                        min_percent=min_percent,
                        max_percent=max_percent,
@@ -68,11 +98,29 @@ def _normalize(scaled_data, min_percent=20, max_percent=99.5):
 def _scale_and_downsample(data, downsample=8,
                          min_percent=20,
                          max_percent=99.5):
-    """Clamp, downsample and normalize an in-memory image.
+    """
+    Clamp, downsample and normalize an in-memory image.
 
-    This is the whole-frame version of :func:`_thumbnail_data`; both clamp
-    with :func:`_clamp` and normalize with :func:`_normalize`, so they
-    return identical arrays for the same image.
+    Parameters
+    ----------
+    data : array-like
+        Full-resolution image data.
+    downsample : int, optional
+        Factor by which each axis is reduced with
+        `astropy.nddata.block_reduce`. No reduction is done if this is 1.
+    min_percent, max_percent : float, optional
+        Percentiles of the downsampled image that map to 0 and 1.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Downsampled image with values in [0, 1] and NaNs replaced with 0.
+
+    Notes
+    -----
+    This is the whole-frame version of `_thumbnail_data`; both clamp with
+    `_clamp` and normalize with `_normalize`, so they return identical
+    arrays for the same image.
     """
     scaled_data = _clamp(data)
     if downsample > 1:
@@ -84,7 +132,24 @@ def _scale_and_downsample(data, downsample=8,
 
 
 def _image_hdu(hdul):
-    """Primary HDU, or the first HDU that actually has data."""
+    """
+    Find the HDU that holds the image in an open FITS file.
+
+    Parameters
+    ----------
+    hdul : astropy.io.fits.HDUList
+        The open FITS file.
+
+    Returns
+    -------
+    HDU object from `astropy.io.fits`
+        The primary HDU if it has data, otherwise the first HDU that does.
+
+    Raises
+    ------
+    ValueError
+        If no HDU in the file has data.
+    """
     for hdu in hdul:
         if hdu.header.get('NAXIS', 0) > 0:
             return hdu
@@ -95,15 +160,36 @@ def _thumbnail_data(fits_path, downsample=8,
                     min_percent=20,
                     max_percent=99.5,
                     band_rows=None):
-    """Downsampled, normalized image data read a band of rows at a time.
+    """
+    Downsampled, normalized image data read a band of rows at a time.
 
+    Parameters
+    ----------
+    fits_path : str or pathlib.Path
+        FITS file to read. It is opened memory-mapped.
+    downsample : int, optional
+        Factor by which each axis is reduced.
+    min_percent, max_percent : float, optional
+        Percentiles of the downsampled image that map to 0 and 1.
+    band_rows : int or None, optional
+        Approximate number of image rows to read at a time. It is passed on
+        to `reducer.image_browser.banded_block_reduce`, which rounds it to
+        a whole number of blocks and uses roughly 256 rows if this is
+        ``None``.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Downsampled image with values in [0, 1] and NaNs replaced with 0.
+
+    Notes
+    -----
     The banded read itself is
-    :func:`~reducer.image_browser.banded_block_reduce`, which reads only a
-    band of rows at a time and clamps each band as it is read, so a full
-    frame (and in particular a full float64 copy of one) is never made.
-    Its result is identical to downsampling the whole frame, so this
-    returns the same array as :func:`_scale_and_downsample` does for the
-    same image.
+    `reducer.image_browser.banded_block_reduce`, which reads only a band of
+    rows at a time and clamps each band as it is read, so a full frame (and
+    in particular a full float64 copy of one) is never made. Its result is
+    identical to downsampling the whole frame, so this returns the same
+    array as `_scale_and_downsample` does for the same image.
     """
     with fits.open(fits_path, memmap=True) as hdul:
         small = banded_block_reduce(_image_hdu(hdul), downsample,
@@ -161,6 +247,28 @@ class ImageWithSelector(ipw.VBox):
 
 
 class ImageSelect(ipw.VBox):
+    """
+    Grid of image thumbnails, each with a checkbox for keeping the image.
+
+    Parameters
+    ----------
+    *args
+        Passed on to `ipywidgets.VBox`.
+    directory : str or pathlib.Path, optional
+        Directory containing the FITS images. Thumbnails are cached in
+        ``<directory>/thumbs`` rather than in the current working
+        directory, so a cache is never reused for a different directory of
+        images.
+    downsample : int, optional
+        Factor by which each image axis is reduced to make a thumbnail.
+    max_workers : int, optional
+        Number of threads used to make thumbnails. The default, 4, is both
+        faster and roughly half the peak memory of one thread per CPU,
+        which matters on a JupyterHub with a per-user memory cap.
+    **kwargs
+        Passed on to `ipywidgets.VBox`.
+    """
+
     # A small pool is both faster and roughly half the peak memory of the
     # default (one thread per CPU) pool, which matters on a JupyterHub with
     # a per-user memory cap.
@@ -189,6 +297,19 @@ class ImageSelect(ipw.VBox):
         self._move_rejects.on_click(self._move_rejects_clicked)
 
     def make_thumbnails(self, thumb_dir=None):
+        """
+        Make a PNG thumbnail for each image that does not have one yet.
+
+        The image collection is refreshed first. A progress bar is displayed
+        while thumbnails are being made, and nothing is displayed if all of
+        them already exist.
+
+        Parameters
+        ----------
+        thumb_dir : str, pathlib.Path or None, optional
+            Directory the thumbnails are written to; it is created if
+            needed. ``None`` means ``<directory>/thumbs``.
+        """
         self._images = []
         thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
         thumby.mkdir(parents=True, exist_ok=True)
@@ -236,6 +357,18 @@ class ImageSelect(ipw.VBox):
             progress_box.layout.display = "none"
 
     def make_selectors(self, thumb_dir=None):
+        """
+        Make one thumbnail-with-checkbox widget for each image.
+
+        Thumbnails that no longer match an image in the directory are
+        deleted first.
+
+        Parameters
+        ----------
+        thumb_dir : str, pathlib.Path or None, optional
+            Directory the thumbnails are read from. ``None`` means
+            ``<directory>/thumbs``.
+        """
         thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
         pngs = list(thumby.glob('*.png'))
 

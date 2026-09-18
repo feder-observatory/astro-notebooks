@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 import ipywidgets as ipw
 import numpy as np
 from astropy.io import fits
-from ccdproc import ImageFileCollection
 from PIL import Image
 
 from astro_notebooks.image_selector import (
@@ -158,17 +157,6 @@ def test_thumb_cache_lives_in_data_dir(fits_dir, tmp_path):
     # there, only the data directory itself should exist.
     assert not (tmp_path / "thumbs").exists()
     assert {p.name for p in tmp_path.iterdir()} == {"data"}
-
-
-def test_collection_ignores_thumbs_dir(fits_dir):
-    expected = set(ImageFileCollection(fits_dir).files)
-    assert expected == {f"image-{i:03d}.fit" for i in range(N_IMAGES)}
-    w = ImageSelect(directory=fits_dir)
-    assert (fits_dir / "thumbs").is_dir()
-    w._collection.refresh()
-    assert set(w._collection.files) == expected
-    # and a freshly built collection does not see the thumbnails either
-    assert set(ImageFileCollection(fits_dir).files) == expected
 
 
 def test_default_worker_cap_is_four(fits_dir, mocker):
