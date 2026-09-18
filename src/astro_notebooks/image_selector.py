@@ -552,14 +552,16 @@ class ImageSelect(ipw.VBox):
         thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
         thumby.mkdir(parents=True, exist_ok=True)
         self._collection.refresh()
-        # Full file names (with extension) and, in the same order, the stems
-        # used to name the thumbnail PNGs.
+        # Full file names (with extension) and, in the same order, the names
+        # used for the thumbnail PNGs. Those are the full file names too,
+        # not the stems, so that x.fit and x.fits do not share a thumbnail
+        # or a checkbox.
         self._im_file_names = []
         self._im_base_names = []
         todo = []
         for fname in self._collection.files_filtered(include_path=True):
             source = Path(fname)
-            base = source.stem
+            base = source.name
             self._im_file_names.append(source.name)
             self._im_base_names.append(base)
             dest_path = thumby / (base + '.png')
@@ -599,7 +601,9 @@ class ImageSelect(ipw.VBox):
         Make one thumbnail-with-checkbox widget for each image.
 
         Thumbnails that no longer match an image in the directory are
-        deleted first.
+        deleted first. That includes thumbnails named after the stem of an
+        image (``x.png``) by earlier versions; they are now named after the
+        full file name (``x.fit.png``).
 
         This is called once, from ``__init__``, which afterwards restores
         the saved selection, starts watching the checkboxes and lays the

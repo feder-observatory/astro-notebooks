@@ -94,13 +94,14 @@ def test_make_one_thumbnail(fits_dir, tmp_path):
 def test_thumbnails_one_per_fits_grayscale(fits_dir):
     """Building the widget writes exactly one thumbnail per FITS file.
 
-    The thumbnails are named after the image files, and each is a
+    The thumbnails are named after the full image file names, extension
+    included, so that ``x.fit`` and ``x.fits`` do not share one. Each is a
     grayscale PNG at 1/8 of the image size, the default downsampling.
     """
     w = ImageSelect(directory=fits_dir)
     thumbs_dir = w.thumbs
     png_names = {p.name for p in thumbs_dir.glob("*.png")}
-    expected_names = {f"image-{i:03d}.png" for i in range(N_IMAGES)}
+    expected_names = {f"image-{i:03d}.fit.png" for i in range(N_IMAGES)}
     assert png_names == expected_names
     for p in thumbs_dir.glob("*.png"):
         img = Image.open(p)
@@ -132,9 +133,9 @@ def test_stale_thumbnails_cleaned_up(fits_dir):
     ImageSelect(directory=fits_dir)
     (fits_dir / "image-000.fit").unlink()
     ImageSelect(directory=fits_dir)
-    assert not (fits_dir / "thumbs" / "image-000.png").exists()
+    assert not (fits_dir / "thumbs" / "image-000.fit.png").exists()
     for i in range(1, N_IMAGES):
-        assert (fits_dir / "thumbs" / f"image-{i:03d}.png").exists()
+        assert (fits_dir / "thumbs" / f"image-{i:03d}.fit.png").exists()
 
 
 def test_progress_ui_shown_and_hidden(fits_dir, mocker):
@@ -172,15 +173,15 @@ def test_image_select_structure(fits_dir):
     """The widget is a single grid holding one selector per image.
 
     Also checks that no button is left (nothing is moved any more, so
-    "Move rejects" is gone), that the base names and full file names are
-    in collection order, and that each selector is showing real PNG
-    bytes.
+    "Move rejects" is gone), that the thumbnail names and file names are
+    both the full file names in collection order, and that each selector
+    is showing real PNG bytes.
     """
     w = ImageSelect(directory=fits_dir)
     assert len(w.children) == 1
     assert isinstance(w.children[0], ipw.GridspecLayout)
     assert not [c for c in _walk_widgets(w) if isinstance(c, ipw.Button)]
-    assert w._im_base_names == [f"image-{i:03d}" for i in range(N_IMAGES)]
+    assert w._im_base_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert w._im_file_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert len(w._selectors) == N_IMAGES
     for sel in w._selectors:
