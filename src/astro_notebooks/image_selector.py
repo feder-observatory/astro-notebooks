@@ -10,6 +10,7 @@ from astropy.visualization import simple_norm
 from ccdproc import ImageFileCollection
 from IPython.display import display
 from PIL import Image
+from reducer.image_browser import banded_block_reduce
 
 try:
     from stellarphot.gui.custom_widgets import Spinner
@@ -35,15 +36,53 @@ class _MessageSpinner(ipw.VBox):
         self.layout.display = "none"
 
 
-def _scale_and_downsample(data, downsample=8,
-                         min_percent=20,
-                         max_percent=99.5):
+def _clamp(data):
+    """
+    Clamp very bright pixels in a float32 copy of the input.
 
-    scaled_data = data.copy()
+    Parameters
+    ----------
+    data : array-like
+        Image data, either a whole frame or one band of rows.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy of ``data`` as float32, with values above 1e5 set to 1e5. NaNs
+        pass through unchanged. The input is never modified.
+
+    Notes
+    -----
+    float32 keeps the memory used by a band of a big image small. This is
+    called on a whole frame by `_scale_and_downsample` and, as the
+    ``preprocess`` argument of `reducer.image_browser.banded_block_reduce`,
+    on one band at a time by `_thumbnail_data`.
+    """
+    # float32 copy: small, short lived, and never a view on the caller's data
+    scaled_data = np.asarray(data).astype(np.float32)
     scaled_data[scaled_data > 1e5] = 1e5
-    if downsample > 1:
-        scaled_data = block_reduce(scaled_data,
-                                   block_size=(downsample, downsample))
+    return scaled_data
+
+
+def _normalize(scaled_data, min_percent=20, max_percent=99.5):
+    """
+    Percentile-scale an already downsampled image to the range 0 to 1.
+
+    Parameters
+    ----------
+    scaled_data : numpy.ndarray
+        Clamped, downsampled image data.
+    min_percent, max_percent : float, optional
+        Percentiles of ``scaled_data`` that map to 0 and 1. Values outside
+        them are clipped.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Same shape as ``scaled_data``, values in [0, 1], NaNs replaced
+        with 0. Nothing is masked; the masked array type is what
+        `astropy.visualization.ImageNormalize` returns.
+    """
     norm = simple_norm(scaled_data,
                        min_percent=min_percent,
                        max_percent=max_percent,
@@ -56,14 +95,119 @@ def _scale_and_downsample(data, downsample=8,
     return normed_data
 
 
+def _scale_and_downsample(data, downsample=8,
+                         min_percent=20,
+                         max_percent=99.5):
+    """
+    Clamp, downsample and normalize an in-memory image.
+
+    Parameters
+    ----------
+    data : array-like
+        Full-resolution image data.
+    downsample : int, optional
+        Factor by which each axis is reduced with
+        `astropy.nddata.block_reduce`. No reduction is done if this is 1.
+    min_percent, max_percent : float, optional
+        Percentiles of the downsampled image that map to 0 and 1.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Downsampled image with values in [0, 1] and NaNs replaced with 0.
+
+    Notes
+    -----
+    This is the whole-frame version of `_thumbnail_data`; both clamp with
+    `_clamp` and normalize with `_normalize`, so they return identical
+    arrays for the same image.
+    """
+    scaled_data = _clamp(data)
+    if downsample > 1:
+        scaled_data = block_reduce(scaled_data,
+                                   block_size=(downsample, downsample))
+    return _normalize(scaled_data,
+                      min_percent=min_percent,
+                      max_percent=max_percent)
+
+
+def _image_hdu(hdul):
+    """
+    Find the HDU that holds the image in an open FITS file.
+
+    Parameters
+    ----------
+    hdul : astropy.io.fits.HDUList
+        The open FITS file.
+
+    Returns
+    -------
+    HDU object from `astropy.io.fits`
+        The primary HDU if it has data, otherwise the first HDU that does.
+
+    Raises
+    ------
+    ValueError
+        If no HDU in the file has data.
+    """
+    for hdu in hdul:
+        if hdu.header.get('NAXIS', 0) > 0:
+            return hdu
+    raise ValueError('no image data found in FITS file')
+
+
+def _thumbnail_data(fits_path, downsample=8,
+                    min_percent=20,
+                    max_percent=99.5,
+                    band_rows=None):
+    """
+    Downsampled, normalized image data read a band of rows at a time.
+
+    Parameters
+    ----------
+    fits_path : str or pathlib.Path
+        FITS file to read. It is opened memory-mapped.
+    downsample : int, optional
+        Factor by which each axis is reduced.
+    min_percent, max_percent : float, optional
+        Percentiles of the downsampled image that map to 0 and 1.
+    band_rows : int or None, optional
+        Approximate number of image rows to read at a time. It is passed on
+        to `reducer.image_browser.banded_block_reduce`, which rounds it to
+        a whole number of blocks and uses roughly 256 rows if this is
+        ``None``.
+
+    Returns
+    -------
+    numpy.ma.MaskedArray
+        Downsampled image with values in [0, 1] and NaNs replaced with 0.
+
+    Notes
+    -----
+    The banded read itself is
+    `reducer.image_browser.banded_block_reduce`, which reads only a band of
+    rows at a time and clamps each band as it is read, so a full frame (and
+    in particular a full float64 copy of one) is never made. Its result is
+    identical to downsampling the whole frame, so this returns the same
+    array as `_scale_and_downsample` does for the same image.
+    """
+    with fits.open(fits_path, memmap=True) as hdul:
+        small = banded_block_reduce(_image_hdu(hdul), downsample,
+                                    band_rows=band_rows,
+                                    preprocess=_clamp)
+
+    return _normalize(small,
+                      min_percent=min_percent,
+                      max_percent=max_percent)
+
+
 def _make_one_thumbnail(fits_path, dest_path, downsample):
     """Make a single uint8 grayscale PNG thumbnail for a FITS image.
 
     Runs in a worker thread; the FITS read, numpy work and PNG encode all
     release the GIL for most of their run time.
     """
-    data = fits.getdata(fits_path)
-    scaled = _scale_and_downsample(data, downsample=downsample)
+    scaled = _thumbnail_data(fits_path, downsample=downsample)
     Image.fromarray((scaled * 255).astype(np.uint8), mode="L").save(dest_path)
 
 
@@ -103,7 +247,35 @@ class ImageWithSelector(ipw.VBox):
 
 
 class ImageSelect(ipw.VBox):
-    def __init__(self, *args, directory=".", downsample=8, max_workers=None, **kwargs):
+    """
+    Grid of image thumbnails, each with a checkbox for keeping the image.
+
+    Parameters
+    ----------
+    *args
+        Passed on to `ipywidgets.VBox`.
+    directory : str or pathlib.Path, optional
+        Directory containing the FITS images. Thumbnails are cached in
+        ``<directory>/thumbs`` rather than in the current working
+        directory, so a cache is never reused for a different directory of
+        images.
+    downsample : int, optional
+        Factor by which each image axis is reduced to make a thumbnail.
+    max_workers : int, optional
+        Number of threads used to make thumbnails. The default, 4, is both
+        faster and roughly half the peak memory of one thread per CPU,
+        which matters on a JupyterHub with a per-user memory cap.
+    **kwargs
+        Passed on to `ipywidgets.VBox`.
+    """
+
+    # A small pool is both faster and roughly half the peak memory of the
+    # default (one thread per CPU) pool, which matters on a JupyterHub with
+    # a per-user memory cap.
+    DEFAULT_MAX_WORKERS = 4
+
+    def __init__(self, *args, directory=".", downsample=8,
+                 max_workers=DEFAULT_MAX_WORKERS, **kwargs):
         super().__init__(*args, **kwargs)
         self.path = Path(directory)
         self._downsample = downsample
@@ -111,7 +283,10 @@ class ImageSelect(ipw.VBox):
         self._collection = ImageFileCollection(self.path)
         self._move_rejects = ipw.Button(description='Move rejects')
 
-        self.thumbs = Path('thumbs')
+        # Cache thumbnails next to the data rather than in the current
+        # working directory, so that a cache is never reused for a
+        # different directory of images.
+        self.thumbs = self.path / 'thumbs'
         self.make_thumbnails(thumb_dir=self.thumbs)
         self.make_selectors(thumb_dir=self.thumbs)
         self.n_cols = 4
@@ -121,20 +296,38 @@ class ImageSelect(ipw.VBox):
         # self.layout.overflow = "scroll hidden"
         self._move_rejects.on_click(self._move_rejects_clicked)
 
-    def make_thumbnails(self, thumb_dir="thumbs"):
+    def make_thumbnails(self, thumb_dir=None):
+        """
+        Make a PNG thumbnail for each image that does not have one yet.
+
+        The image collection is refreshed first. A progress bar is displayed
+        while thumbnails are being made, and nothing is displayed if all of
+        them already exist.
+
+        Parameters
+        ----------
+        thumb_dir : str, pathlib.Path or None, optional
+            Directory the thumbnails are written to; it is created if
+            needed. ``None`` means ``<directory>/thumbs``.
+        """
         self._images = []
-        thumby = Path(thumb_dir)
-        thumby.mkdir(exist_ok=True)
+        thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
+        thumby.mkdir(parents=True, exist_ok=True)
         self._collection.refresh()
-        self._im_base_bames = []
+        # Full file names (with extension) and, in the same order, the stems
+        # used to name the thumbnail PNGs.
+        self._im_file_names = []
+        self._im_base_names = []
         todo = []
         for fname in self._collection.files_filtered(include_path=True):
-            base = Path(fname).stem
-            self._im_base_bames.append(base)
+            source = Path(fname)
+            base = source.stem
+            self._im_file_names.append(source.name)
+            self._im_base_names.append(base)
             dest_path = thumby / (base + '.png')
             if dest_path.exists():
                 continue
-            todo.append((Path(fname), dest_path))
+            todo.append((source, dest_path))
 
         if not todo:
             return
@@ -163,31 +356,43 @@ class ImageSelect(ipw.VBox):
             spinner.stop()
             progress_box.layout.display = "none"
 
-    def make_selectors(self, thumb_dir="thumbs"):
-        kiddos = []
-        pngs = list(Path(thumb_dir).glob('*.png'))
+    def make_selectors(self, thumb_dir=None):
+        """
+        Make one thumbnail-with-checkbox widget for each image.
+
+        Thumbnails that no longer match an image in the directory are
+        deleted first.
+
+        Parameters
+        ----------
+        thumb_dir : str, pathlib.Path or None, optional
+            Directory the thumbnails are read from. ``None`` means
+            ``<directory>/thumbs``.
+        """
+        thumby = Path(thumb_dir) if thumb_dir is not None else self.thumbs
+        pngs = list(thumby.glob('*.png'))
 
         for thumb in pngs:
-            if thumb.stem not in self._im_base_bames:
+            if thumb.stem not in self._im_base_names:
                 thumb.unlink()
-        pngs = list(Path(thumb_dir).glob('*.png'))
+        pngs = list(thumby.glob('*.png'))
 
         png_dict = {p.stem: p for p in pngs}
 
         kiddos = {}
-        for ims in self._im_base_bames:
+        for ims in self._im_base_names:
             image_png = png_dict[ims].read_bytes()
             iws = ImageWithSelector(image_png, fname=ims)
             kiddos[ims] = iws
 
-        self._selectors = [kiddos[ims] for ims in self._im_base_bames]
+        self._selectors = [kiddos[ims] for ims in self._im_base_names]
 
     def _move_rejects_clicked(self, _):
         reject_land = Path(self.path / 'rejects')
-        for f, selector in zip(self._im_base_bames, self._selectors):
+        for f, selector in zip(self._im_file_names, self._selectors):
             if not selector._valid_mark.value:
                 reject_land.mkdir(exist_ok=True)
-                source = self.path / Path(f + ".fit")
+                source = self.path / f
                 dest = reject_land / source.name
                 source.rename(dest)
 
