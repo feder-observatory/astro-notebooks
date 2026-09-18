@@ -378,11 +378,13 @@ class ColorImageMaker:
         # Data storage
         self.data_sm = {}
         self.data = {}
-        self.sc_raw = {}
         self.data_sm_raw = {}
         self.data_raw_unmod = {}
         self.bkgd_sm = {}
         self.bkgd_f = {}
+        # One plane of the preview per colour, each of them a pass over a
+        # whole frame, so they are kept until something changes them.
+        self.preview_planes = {}
 
         self._build_widgets()
         self._load_data()
@@ -479,11 +481,13 @@ class ColorImageMaker:
             layout={'width': '90%'},
         )
 
-        for slider in [self.r_slider, self.g_slider, self.b_slider]:
-            slider.observe(self._update_preview, names='value')
-        for color in self._colors:
-            self.level_sliders[color].observe(self._update_preview, names='value')
-        self.stretch_chooser.observe(self._update_preview, names='value')
+        # A mixer slider changes one colour of the preview; the sliders and
+        # the dropdown on the first tab change one or all three, and their
+        # observers redraw the preview themselves.
+        for color, slider in zip(
+            self._colors, [self.r_slider, self.g_slider, self.b_slider]
+        ):
+            slider.observe(self._make_mix_observer(color), names='value')
         self.subtract_bkgd_checkbox.observe(self._on_subtract_change, names='value')
 
     def _build_save_tab(self):
@@ -574,9 +578,11 @@ class ColorImageMaker:
                 self._stretches[self.stretch_chooser.value]
             )
 
-        # Initialise sc_raw using current slider cuts
-        for color in self._colors:
-            self._make_level_observer(color)(dict(new=self.level_sliders[color].value))
+        # Give the viewers the cuts the level sliders are set to. The
+        # preview planes are made the first time the preview is drawn.
+        for color, interval in self._intervals().items():
+            self.image_widgets[color].set_cuts(interval)
+        self.preview_planes.clear()
 
     def _compute_backgrounds(self):
         """Compute and store background models for all channels (called lazily)."""
@@ -652,60 +658,112 @@ class ColorImageMaker:
         return rgb_uint8(self.data, self._intervals(), self._stretch(),
                          self._weights())
 
-    def _rgb_scaling(self, sc_data, r=0.5, g=0.5, b=0.5):
-        red_sc = r * sc_data['red']
-        green_sc = g * sc_data['green']
-        blue_sc = b * sc_data['blue']
-        comb = np.zeros(list(red_sc.shape) + [3])
-        comb[:, :, 0] = red_sc
-        comb[:, :, 1] = green_sc
-        comb[:, :, 2] = blue_sc
-        maxes = [np.nanmax(red_sc), np.nanmax(green_sc), np.nanmax(blue_sc)]
-        comb = 2 * comb
-        comb[comb > 1] = 1.0
-        return comb, maxes
+    def _preview_plane(self, color):
+        """
+        The preview plane of one colour, made if it is not already in hand.
 
-    def _quick_color_rgb(self, r=0.5, g=0.5, b=0.5, output=None):
-        comb, maxes = self._rgb_scaling(self.sc_raw, r, g, b)
-        max_img = np.nanmax(comb.flatten())
-        if output is None:
-            return
-        with output:
-            output.clear_output(wait=True)
-            fig, ax = plt.subplots(figsize=(8, 8))
-            ax.set_title(f'{max_img=:.3f} {r=:.2f} {g=:.2f} {b=:.2f}\n{maxes=}')
-            ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
-            ax.imshow(comb, vmin=0, vmax=1)
-            plt.show()
+        A plane costs one pass over the full size frame, so the three are
+        kept: moving one slider changes one colour of the preview, or, for
+        the stretch and the background, all three.
+
+        Parameters
+        ----------
+        color : str
+            One of `COLORS`.
+
+        Returns
+        -------
+        `numpy.ndarray`
+            The plane, `REDUCE` times smaller than the frame.
+        """
+        if color not in self.preview_planes:
+            self.preview_planes[color] = preview_plane(
+                self.data[color], self._intervals()[color], self._stretch(),
+                self._weights()[color],
+            )
+        return self.preview_planes[color]
 
     # ------------------------------------------------------------------
     # Observers / callbacks
     # ------------------------------------------------------------------
 
-    def _get_scaled_image_data(self, viewer, data):
-        return viewer.get_stretch()(viewer.get_cuts()(data))
-
     def _make_level_observer(self, color):
+        """
+        Make the observer for one colour's black and white point slider.
+
+        Parameters
+        ----------
+        color : str
+            One of `COLORS`.
+
+        Returns
+        -------
+        callable
+            Observer that gives the viewer the new cuts and remakes that
+            colour of the preview.
+        """
         def observer(change):
             minval, maxval = change['new']
             self.image_widgets[color].set_cuts(ManualInterval(minval, maxval))
-            self.sc_raw[color] = self._get_scaled_image_data(
-                self.image_widgets[color], self.data_sm[color]
-            )
+            self.preview_planes.pop(color, None)
+            self._update_preview()
+        return observer
+
+    def _make_mix_observer(self, color):
+        """
+        Make the observer for one colour's slider in the mixer.
+
+        Parameters
+        ----------
+        color : str
+            One of `COLORS`.
+
+        Returns
+        -------
+        callable
+            Observer that remakes that colour of the preview. The weight
+            is applied before the image is averaged, so the plane really
+            does have to be made again from the frame.
+        """
+        def observer(change):
+            self.preview_planes.pop(color, None)
+            self._update_preview()
         return observer
 
     def _stretch_observer(self, change):
+        """
+        Give every viewer the chosen stretch and remake the whole preview.
+
+        Parameters
+        ----------
+        change : dict
+            The traitlets change, whose ``'new'`` is the name of a stretch.
+        """
         for color in self._colors:
             self.image_widgets[color].set_stretch(self._stretches[change['new']])
-            self.sc_raw[color] = self._get_scaled_image_data(
-                self.image_widgets[color], self.data_sm[color]
-            )
+        self.preview_planes.clear()
+        self._update_preview()
 
-    def _update_preview(self, change):
-        self._quick_color_rgb(
-            self.r_slider.value, self.g_slider.value, self.b_slider.value,
-            output=self.preview_output,
-        )
+    def _update_preview(self, change=None):
+        """
+        Draw the colour preview from the three planes.
+
+        Parameters
+        ----------
+        change : dict, optional
+            Ignored; lets this be used as an observer.
+        """
+        comb = np.stack([self._preview_plane(c) for c in self._colors], axis=-1)
+        maxes = [round(float(comb[:, :, i].max()), 3) for i in range(3)]
+        max_img = max(maxes)
+        r, g, b = (self._weights()[c] for c in self._colors)
+        with self.preview_output:
+            self.preview_output.clear_output(wait=True)
+            fig, ax = plt.subplots(figsize=(8, 8))
+            ax.set_title(f'{max_img=:.3f} {r=:.2f} {g=:.2f} {b=:.2f}\n{maxes=}')
+            ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
+            ax.imshow(comb, vmin=0, vmax=1)
+            plt.show()
 
     def _on_tab_change(self, change):
         if change['new'] == 2:
@@ -722,8 +780,8 @@ class ColorImageMaker:
             self.image_widgets[color].set_stretch(
                 self._stretches[self.stretch_chooser.value]
             )
-            self._make_level_observer(color)(dict(new=self.level_sliders[color].value))
-        self._update_preview(None)
+        self.preview_planes.clear()
+        self._update_preview()
 
     # ------------------------------------------------------------------
     # Jupyter display

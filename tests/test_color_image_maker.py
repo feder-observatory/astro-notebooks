@@ -1,4 +1,5 @@
 import io
+import tracemalloc
 
 import matplotlib
 
@@ -36,6 +37,8 @@ from astro_notebooks.color_image_maker import (
 # 512 pixel background boxes used on the full-size frames.
 IMAGE_SHAPE = (1024, 1024)
 REDUCED_SHAPE = (128, 128)
+# Several bands of rows, for the tests that measure memory.
+BIG_IMAGE_SHAPE = (2048, 2048)
 FILTERS = ["rp", "V", "B"]
 
 
@@ -67,6 +70,26 @@ def combined_dir(tmp_path):
 
 
 @pytest.fixture
+def big_maker(tmp_path):
+    """A ``ColorImageMaker`` built from frames of a more realistic size.
+
+    Big enough that one band of rows is a small fraction of a frame,
+    which is what makes a measurement of the memory a slider move costs
+    mean anything.
+    """
+    directory = tmp_path / "big"
+    directory.mkdir()
+    rng = np.random.default_rng(11)
+    for filt in FILTERS:
+        data = rng.uniform(100.0, 1000.0, size=BIG_IMAGE_SHAPE).astype(np.float32)
+        hdu = fits.PrimaryHDU(data)
+        hdu.header["BUNIT"] = "adu"
+        hdu.header["OBJECT"] = "ngc 7331"
+        hdu.writeto(directory / f"combined_light_filter_{filt}.fit")
+    return ColorImageMaker(str(directory))
+
+
+@pytest.fixture
 def maker(combined_dir):
     """A ``ColorImageMaker`` built from the synthetic combined images."""
     return ColorImageMaker(str(combined_dir))
@@ -88,27 +111,28 @@ def test_construction_loads_images(maker):
         # The cuts come from the level slider, not the viewer's default.
         assert isinstance(viewer.get_cuts(), ManualInterval)
         assert isinstance(viewer.get_stretch(), LinearStretch)
-        assert maker.sc_raw[color].shape == REDUCED_SHAPE
+        assert maker._preview_plane(color).shape == REDUCED_SHAPE
         assert maker.data_raw_unmod[color].shape == IMAGE_SHAPE
 
 
 def test_level_slider_sets_cuts(maker):
     """Moving one channel's level slider sets that viewer's cuts.
 
-    The scaled data for that channel is recomputed with the new cuts,
-    and the other channels are left alone.
+    That channel of the preview is made again with the new cuts, and the
+    other two are left as they were rather than being recomputed, which
+    would mean two more passes over a frame for nothing.
     """
-    green_before = maker.sc_raw["green"].copy()
-    red_before = maker.sc_raw["red"].copy()
+    green_before = maker._preview_plane("green")
+    red_before = maker._preview_plane("red").copy()
 
     maker.level_sliders["red"].value = (200.0, 900.0)
 
     cuts = maker.image_widgets["red"].get_cuts()
     assert (cuts.vmin, cuts.vmax) == (200.0, 900.0)
-    assert not np.allclose(red_before, maker.sc_raw["red"])
-    assert maker.sc_raw["red"].shape == REDUCED_SHAPE
+    assert not np.allclose(red_before, maker.preview_planes["red"])
+    assert maker.preview_planes["red"].shape == REDUCED_SHAPE
     # Only the red channel should have been touched.
-    np.testing.assert_array_equal(green_before, maker.sc_raw["green"])
+    assert maker.preview_planes["green"] is green_before
 
 
 @pytest.mark.parametrize(
@@ -118,16 +142,16 @@ def test_stretch_chooser_sets_stretch(maker, name, stretch_class):
     """The stretch dropdown sets an astropy stretch on every viewer.
 
     The dropdown holds names, but astrowidgets 0.6 only accepts stretch
-    objects, so each name must map to the right class. The scaled data
-    used for the colour image must change too.
+    objects, so each name must map to the right class. The stretch is
+    part of every colour of the preview, so all three are made again.
     """
-    before = {c: maker.sc_raw[c].copy() for c in maker.image_widgets}
+    before = {c: maker._preview_plane(c).copy() for c in COLORS}
 
     maker.stretch_chooser.value = name
 
     for color, viewer in maker.image_widgets.items():
         assert isinstance(viewer.get_stretch(), stretch_class)
-        assert not np.allclose(before[color], maker.sc_raw[color])
+        assert not np.allclose(before[color], maker.preview_planes[color])
 
 
 def test_background_subtraction_keeps_cuts_and_stretch(maker):
@@ -539,3 +563,46 @@ def test_loading_blanks_pixels_missing_from_any_one_filter(tmp_path):
     for color in COLORS:
         assert maker.data_raw_unmod[color].dtype == np.float32
         np.testing.assert_array_equal(np.isnan(maker.data_raw_unmod[color]), missing)
+
+
+def test_preview_is_the_saved_image_averaged(maker):
+    """What the widget previews is what it would save, seen smaller.
+
+    The preview used to average the frames first and stretch afterwards,
+    which lifted the sky by as much as a tenth of the full range, so a
+    student tuned the black point on an image that was not the one they
+    got. The cuts, the stretch and the mixer weight now all come from the
+    widgets and are applied before the averaging.
+    """
+    maker.level_sliders["green"].value = (30.0, 800.0)
+    maker.stretch_chooser.value = "log"
+    maker.g_slider.value = 0.35
+
+    plane = maker.preview_planes["green"]
+
+    full_size = scaled_band(
+        maker.data["green"], ManualInterval(30.0, 800.0), LogStretch(), 0.35
+    )
+    np.testing.assert_allclose(plane, _block_means(full_size), rtol=1e-6)
+
+
+def test_slider_move_makes_nothing_the_size_of_a_frame(big_maker):
+    """Moving a slider does not allocate another full size image.
+
+    Every copy of a frame counts against the gigabyte a student has on
+    the hub, and the old code made several: a float64 image of the whole
+    frame for each colour on every slider move. Working a band at a time
+    should cost a small fraction of one frame.
+    """
+    frame_bytes = big_maker.data["red"].nbytes
+    # Warm up, so that what is measured is the slider move alone.
+    big_maker._update_preview()
+
+    tracemalloc.start()
+    try:
+        big_maker.level_sliders["red"].value = (100.0, 800.0)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < frame_bytes
