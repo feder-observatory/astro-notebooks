@@ -33,16 +33,30 @@ from .image_quality import (
     summarize_metrics,
 )
 
-try:
-    from stellarphot.gui.custom_widgets import Spinner
-except Exception:
-    # stellarphot's GUI extras may be missing or incompatible; fall back to
-    # a message-only stand-in with the same start/stop interface.
-    Spinner = None
+class _Spinner(ipw.VBox):
+    """
+    Message shown while the images are being prepared.
 
+    Parameters
+    ----------
+    *args
+        Passed on to `ipywidgets.VBox`.
+    message : str, optional
+        Text shown while the spinner is running.
+    **kwargs
+        Passed on to `ipywidgets.VBox`.
 
-class _MessageSpinner(ipw.VBox):
-    """Fallback for stellarphot's Spinner when it cannot be imported."""
+    Notes
+    -----
+    Hidden until `start` is called and hidden again by `stop`, so that it
+    is on screen only while there is work going on.
+
+    This used to be stellarphot's ``Spinner``, which is the same widget
+    with an animated star beside the message. Importing it cost about
+    180 MB and three seconds, because it pulls in the whole of stellarphot
+    (pandas, scikit-learn, astroquery and more), which is far too much for
+    a per-user memory cap on a shared JupyterHub.
+    """
 
     def __init__(self, *args, message="", **kwargs):
         super().__init__(*args, **kwargs)
@@ -50,10 +64,17 @@ class _MessageSpinner(ipw.VBox):
         self.children = [self._message]
         self.layout.display = "none"
 
+    @property
+    def message(self):
+        """Text currently shown beside the progress bar."""
+        return self._message.value
+
     def start(self):
+        """Show the message."""
         self.layout.display = "flex"
 
     def stop(self):
+        """Hide the message."""
         self.layout.display = "none"
 
 
@@ -960,8 +981,7 @@ class ImageSelect(ipw.VBox):
 
     def _run_jobs(self, thumbnail_todo, measure_todo, thumb_dir):
         """Run the thumbnail and measurement jobs behind a progress bar."""
-        spinner_cls = Spinner if Spinner is not None else _MessageSpinner
-        spinner = spinner_cls(message="Preparing images...")
+        spinner = _Spinner(message="Preparing images...")
         progress = ipw.IntProgress(
             value=0, min=0,
             max=len(thumbnail_todo) + len(measure_todo),

@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -844,3 +846,20 @@ def test_progress_covers_thumbnails_and_metrics(star_fits_dir, viewer_factory,
     displayed.clear()
     ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     assert displayed == []
+
+
+def test_importing_the_selector_does_not_import_stellarphot():
+    """Opening the selector must not drag the whole of stellarphot in.
+
+    stellarphot pulls in pandas, scikit-learn, astroquery and more, about
+    180 MB and a couple of seconds, which is far too much to spend on a
+    shared JupyterHub with a per-user memory cap. A fresh interpreter is
+    used so that a module imported by another test cannot hide a
+    regression here.
+    """
+    code = ("import sys, astro_notebooks.image_selector; "
+            "print(any(m == 'stellarphot' or m.startswith('stellarphot.') "
+            "for m in sys.modules))")
+    result = subprocess.run([sys.executable, "-c", code],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "False"
