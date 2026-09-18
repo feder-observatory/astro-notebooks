@@ -586,17 +586,29 @@ class ImageSelect(ipw.VBox):
     downsample : int, optional
         Factor by which each image axis is reduced to make a thumbnail.
     max_workers : int, optional
-        Number of threads used to make thumbnails. The default, 4, is both
-        faster and roughly half the peak memory of one thread per CPU,
-        which matters on a JupyterHub with a per-user memory cap.
+        Number of threads used to make thumbnails and measure stars. The
+        default, 2, keeps peak memory down on a shared JupyterHub, where
+        each user has about a gigabyte and about one core; see
+        :attr:`DEFAULT_MAX_WORKERS`.
     **kwargs
         Passed on to `ipywidgets.VBox`.
     """
 
-    # A small pool is both faster and roughly half the peak memory of the
-    # default (one thread per CPU) pool, which matters on a JupyterHub with
-    # a per-user memory cap.
-    DEFAULT_MAX_WORKERS = 4
+    # Every thumbnail thread holds a band of a frame and the pages of that
+    # frame it has touched, so peak memory goes up with the size of the
+    # pool while the time saved quickly stops doing so. On ten 4096x4096
+    # frames, preparing them cold cost about 325 MB with one thread,
+    # 386 MB with two and 500 MB with four, in 3.2 s, 2.4 s and 2.1 s.
+    #
+    # Two is the useful middle. It gives back about 115 MB of a student's
+    # gigabyte for the 0.3 s that four threads saved on a ten-core laptop
+    # -- and on the class hub, where fifteen students share sixteen cores,
+    # even that 0.3 s is not really there to win. One thread would save
+    # another 60 MB or so but takes a third longer, because a second
+    # thread still overlaps the FITS reads (which release the GIL) with
+    # the work on the band already read, and that overlap is worth most
+    # when there is only one core to go round.
+    DEFAULT_MAX_WORKERS = 2
 
     # How tall the scrolling panel of thumbnails is, and how wide the
     # tiles and the panel that holds them are.
