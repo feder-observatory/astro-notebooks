@@ -32,6 +32,9 @@ dependencies = [
   "numpy",
   "reproject>=0.13",
   "astrowidgets>=0.6.0",
+  # Older releases cannot draw with the bqplot front end astrowidgets needs;
+  # the image viewer stays blank.
+  "bqplot-image-gl>=1.10",
   "reducer>=0.9.3",
   "ipyevents",
 ]
