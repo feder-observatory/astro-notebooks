@@ -438,6 +438,11 @@ def _flag_span(text, flagged):
 class ImageWithSelector(ipw.VBox):
     # value = tr.Bool(default_value=True).tag(sync=True)
 
+    # The box drawn around each tile, and the space inside and outside it.
+    TILE_BORDER = '1px solid #9e9e9e'
+    TILE_PADDING = '6px'
+    TILE_MARGIN = '4px'
+
     def __init__(self, image_png, *args, width="200px", fname="", **kwargs):
         super().__init__(*args, **kwargs)
         self._fname = fname
@@ -452,11 +457,15 @@ class ImageWithSelector(ipw.VBox):
         )
         self._selector = ipw.Checkbox(
             description='Use image',
-            value=True
+            value=True,
+            # Without these the label is squeezed out of the narrow tile.
+            indent=False,
+            layout=dict(width='auto')
         )
         self._valid_mark = ipw.Valid(
             description='',
-            value=True
+            value=True,
+            layout=dict(width='auto')
         )
 
         self._name = ipw.HTML(value=fname)
@@ -476,6 +485,11 @@ class ImageWithSelector(ipw.VBox):
                                         self._star_cutout, self.select_box])
         self.children = [self.image_display, self.mobox]
         self.layout.width = width
+        # Box each tile in so that it is obvious which checkbox goes with
+        # which thumbnail.
+        self.layout.border = self.TILE_BORDER
+        self.layout.padding = self.TILE_PADDING
+        self.layout.margin = self.TILE_MARGIN
 
     def set_metrics(self, metrics, cutout_png=None):
         """Show this frame's star measurements on the tile.

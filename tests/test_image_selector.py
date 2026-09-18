@@ -787,6 +787,25 @@ def test_tiles_show_metrics(star_fits_dir, viewer_factory):
     assert names == {"stars-003.fit", "stars-004.fit"}
 
 
+def test_each_tile_is_boxed_in(fits_dir, viewer_factory):
+    """Every tile has a border, and its checkbox label fits inside it.
+
+    The border is what ties a checkbox to its thumbnail, and the checkbox
+    must not be indented or fixed-width, or its label is squeezed out of
+    the narrow tile.
+    """
+    w = ImageSelect(directory=fits_dir, viewer_factory=viewer_factory)
+    for tile in w._selectors:
+        assert tile.layout.border_top == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_bottom == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_left == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_right == ImageWithSelector.TILE_BORDER
+        assert tile.layout.padding == ImageWithSelector.TILE_PADDING
+        assert tile.layout.margin == ImageWithSelector.TILE_MARGIN
+        assert tile._selector.indent is False
+        assert tile._selector.layout.width == 'auto'
+
+
 def test_tiles_without_metrics_say_so(fits_dir, viewer_factory):
     """With no stars to measure, tiles say "FWHM: n/a" and show no cutout.
 
