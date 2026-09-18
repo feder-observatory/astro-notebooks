@@ -169,18 +169,27 @@ def test_no_progress_display_when_cached(fits_dir, mocker):
     assert displayed == []
 
 
-def test_image_select_structure(fits_dir):
-    """The widget is a hidden message above one grid of selectors.
+def test_image_select_structure(fits_dir, viewer_factory):
+    """The widget is a hidden message above the tiles and the viewer.
 
-    Also checks that no button is left (nothing is moved any more, so
-    "Move rejects" is gone), that the thumbnail names and file names are
-    both the full file names in collection order, and that each selector
-    is showing real PNG bytes.
+    The tiles wrap in a scrolling box on the left, and the viewer with its
+    details panel is on the right. Also checks that no button is left
+    (nothing is moved any more, so "Move rejects" is gone), that the
+    thumbnail names and file names are both the full file names in
+    collection order, and that each selector is showing real PNG bytes.
     """
-    w = ImageSelect(directory=fits_dir)
+    w = ImageSelect(directory=fits_dir, viewer_factory=viewer_factory)
     assert len(w.children) == 2
     assert w.children[0].layout.display == 'none' and w.message == ''
-    assert isinstance(w.children[1], ipw.GridspecLayout)
+    top = w.children[1]
+    assert isinstance(top, ipw.HBox)
+    tiles_box, right_panel = top.children
+    assert isinstance(tiles_box, ipw.Box)
+    assert tiles_box.layout.flex_flow == "row wrap"
+    assert tiles_box.layout.overflow == "hidden auto"
+    assert tiles_box.children == tuple(w._selectors)
+    assert isinstance(right_panel, ipw.VBox)
+    assert right_panel.children == (w.viewer, w.details)
     assert not [c for c in _walk_widgets(w) if isinstance(c, ipw.Button)]
     assert w._im_base_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
     assert w._im_file_names == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
@@ -681,3 +690,157 @@ def test_selected_combiner_rejects_image_source_argument(combine_dirs):
     with pytest.raises(TypeError, match="file_name_base"):
         SelectedCombiner(image_select=isel, run_label="run",
                          file_name_base="other", destination=str(destination))
+
+
+def test_click_shows_frame_in_viewer(star_fits_dir, viewer_factory,
+                                     mock_viewer):
+    """Showing a frame loads that file into the viewer and describes it.
+
+    ``_show_frame`` is what a click on a thumbnail calls. The details
+    panel under the viewer must name the frame and give its FWHM, so the
+    user can tell which frame they are looking at.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w._show_frame(2)
+    mock_viewer.load_image.assert_called_once_with(
+        str(star_fits_dir / "stars-002.fit")
+    )
+    details = " ".join(c.value for c in _walk_widgets(w.details)
+                       if isinstance(c, ipw.HTML))
+    assert "stars-002.fit" in details
+    assert "FWHM" in details
+
+
+def test_show_frame_by_name(star_fits_dir, viewer_factory, mock_viewer):
+    """``show_frame`` takes a file name, as found in ``selected_files``.
+
+    It is the public way to show a frame from code, and must load the
+    same file a click on that thumbnail would.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w.show_frame("stars-004.fit")
+    mock_viewer.load_image.assert_called_once_with(
+        str(star_fits_dir / "stars-004.fit")
+    )
+
+
+def test_showing_another_frame_replaces_the_first(star_fits_dir,
+                                                  viewer_factory,
+                                                  mock_viewer):
+    """Each frame shown replaces the one before rather than being added to it.
+
+    The viewer keeps every image loaded under a different label, and
+    full-size frames are big enough to exhaust the memory allowed on the
+    hub, so ``load_image`` must be called with the file alone and no
+    label.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w.show_frame("stars-000.fit")
+    w.show_frame("stars-001.fit")
+    # one image at a time: no label is passed, so each load replaces the last
+    assert mock_viewer.load_image.call_count == 2
+    for call in mock_viewer.load_image.call_args_list:
+        assert call.kwargs == {}
+        assert len(call.args) == 1
+
+
+def test_details_show_star_cutouts(star_fits_dir, viewer_factory):
+    """The details panel shows a close-up of every star measured on the frame.
+
+    Each is real PNG data, so the user can see for themselves why a frame
+    was flagged.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w.show_frame("stars-000.fit")
+    images = [c for c in _walk_widgets(w.details) if isinstance(c, ipw.Image)]
+    assert len(images) == len(w.star_positions)
+    for image in images:
+        assert bytes(image.value).startswith(b'\x89PNG')
+
+
+def test_every_tile_has_a_click_event(star_fits_dir, viewer_factory):
+    """Every thumbnail has its own click event, and the widget keeps hold of them.
+
+    The ``ipyevents`` objects stop reporting clicks once they are garbage
+    collected, so they must stay referenced for the life of the widget.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    assert len(w._click_events) == len(w._selectors)
+    for event, tile in zip(w._click_events, w._selectors):
+        assert event.source is tile.image_display
+        assert event.watched_events == ['click']
+
+
+def test_tiles_show_metrics(star_fits_dir, viewer_factory):
+    """Each tile shows its FWHM and a star cutout, and only the bad frames are in red.
+
+    The red text is the whole point of the measurements: it must be on
+    the broad frame and the dim frame and on no others.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    for tile in w._selectors:
+        assert "FWHM" in tile._quality.value
+        assert "n/a" not in tile._quality.value
+        assert bytes(tile._star_cutout.value).startswith(b'\x89PNG')
+    flagged = [tile for tile in w._selectors if "color:" in tile._quality.value]
+    names = {tile._fname for tile in flagged}
+    assert names == {"stars-003.fit", "stars-004.fit"}
+
+
+def test_each_tile_is_boxed_in(fits_dir, viewer_factory):
+    """Every tile has a border, and its checkbox label fits inside it.
+
+    The border is what ties a checkbox to its thumbnail, and the checkbox
+    must not be indented or fixed-width, or its label is squeezed out of
+    the narrow tile.
+    """
+    w = ImageSelect(directory=fits_dir, viewer_factory=viewer_factory)
+    for tile in w._selectors:
+        assert tile.layout.border_top == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_bottom == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_left == ImageWithSelector.TILE_BORDER
+        assert tile.layout.border_right == ImageWithSelector.TILE_BORDER
+        assert tile.layout.padding == ImageWithSelector.TILE_PADDING
+        assert tile.layout.margin == ImageWithSelector.TILE_MARGIN
+        assert tile._selector.indent is False
+        assert tile._selector.layout.width == 'auto'
+
+
+def test_tiles_without_metrics_say_so(fits_dir, viewer_factory):
+    """With no stars to measure, tiles say "FWHM: n/a" and show no cutout.
+
+    An empty label would look like a bug, and a missing measurement must
+    never be mistaken for a good one.
+    """
+    w = ImageSelect(directory=fits_dir, viewer_factory=viewer_factory)
+    for tile in w._selectors:
+        assert tile._quality.value == "FWHM: n/a"
+        assert bytes(tile._star_cutout.value) == b""
+
+
+def test_progress_covers_thumbnails_and_metrics(star_fits_dir, viewer_factory,
+                                                mocker):
+    """One progress bar covers both the thumbnails and the measurements.
+
+    It counts one step for each, per frame, reaches its end and is then
+    hidden. When everything is cached nothing is displayed at all, so
+    opening the notebook a second time does not flash a progress bar.
+    """
+    displayed = []
+    mocker.patch("astro_notebooks.image_selector.display",
+                 side_effect=lambda *a, **k: displayed.extend(a))
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    assert len(displayed) == 1
+    progress = [c for c in _walk_widgets(displayed[0])
+                if isinstance(c, ipw.IntProgress)]
+    assert len(progress) == 1
+    # one thumbnail and one set of measurements per frame
+    n_frames = len(w._im_file_names)
+    assert progress[0].max == 2 * n_frames
+    assert progress[0].value == 2 * n_frames
+    assert displayed[0].layout.display == "none"
+
+    # everything is cached now, so a second widget shows no progress at all
+    displayed.clear()
+    ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    assert displayed == []
