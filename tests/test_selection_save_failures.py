@@ -124,6 +124,25 @@ def test_malformed_selection_file_is_kept_as_backup(fits_dir):
     assert w.message == ''
 
 
+def test_non_boolean_entries_are_kept_as_backup(fits_dir):
+    """A file with values that are not true/false is copied before rewriting.
+
+    Entries like ``0`` and ``1`` are ignored and the save that follows
+    rewrites them as true, which would erase an exclusion someone made by
+    hand or with a script. The file as it was must survive in the backup.
+    """
+    path = fits_dir / SELECTION_FILE_NAME
+    original = json.dumps({ALL_NAMES[0]: 0, ALL_NAMES[1]: False}).encode()
+    path.write_bytes(original)
+
+    with pytest.warns(UserWarning, match=r'copied to .*\.bak'):
+        w = ImageSelect(directory=fits_dir)
+
+    assert (fits_dir / (SELECTION_FILE_NAME + '.bak')).read_bytes() == original
+    assert ALL_NAMES[1] not in w.selected_files
+    assert ALL_NAMES[0] in w.selected_files
+
+
 def test_empty_selection_file_is_kept_as_backup(fits_dir):
     """A zero-length selection file, as a crash can leave, is set aside.
 

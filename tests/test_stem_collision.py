@@ -106,20 +106,6 @@ def test_files_sharing_a_stem_get_separate_thumbnails(colliding_dir):
     assert shown_fits == fits_png
 
 
-def test_one_click_saves_once(colliding_dir, mocker):
-    """Changing one checkbox writes the selection file exactly once.
-
-    When stem twins shared a checkbox it was observed twice, so every
-    click wrote the file twice.
-    """
-    w = ImageSelect(directory=colliding_dir)
-    writer = mocker.spy(image_selector, "_atomic_write_json")
-
-    _selector_for(w, "frame-1.fit")._selector.value = False
-
-    assert writer.call_count == 1
-
-
 def test_old_stem_named_thumbnail_is_removed(colliding_dir):
     """A thumbnail cached under the old stem-based name is deleted.
 

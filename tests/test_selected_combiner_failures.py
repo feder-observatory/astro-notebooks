@@ -87,7 +87,7 @@ def test_manifest_lists_only_frames_matching_apply_to(mixed_dirs):
     manifest = json.loads(combiner.manifest_path.read_text())
     assert manifest["included"] == LIGHTS
     assert manifest["excluded"] == [DARK]
-    assert "2 of 3 images were combined" in combiner.message
+    assert "2 of the 3 checked images were combined" in combiner.message
     assert combiner.last_error is None
 
 
@@ -237,6 +237,92 @@ def test_stale_check_skipped_after_failed_save(mixed_dirs, mocker):
     assert (destination / "run_filter_V.fit").exists()
     manifest = json.loads(combiner.manifest_path.read_text())
     assert manifest["included"] == [LIGHTS[1]]
+    _assert_unlockable(combiner)
+
+
+def test_failed_save_does_not_hide_a_replaced_selector(mixed_dirs, mocker):
+    """A failed save on an old selector must not switch the stale check off.
+
+    Selector A fails to save one click, then the selector cell is run
+    again and everything is unchecked in the new selector B. The file now
+    matches neither A's checkboxes nor what A last wrote, so A's combiner
+    must refuse rather than combine A's forgotten checkboxes.
+    """
+    data_dir, destination = mixed_dirs
+    isel_a = ImageSelect(directory=data_dir)
+    combiner = _make_combiner(isel_a, destination)
+    mocker.patch("astro_notebooks.image_selector._atomic_write_json",
+                 side_effect=OSError("disk full"))
+    isel_a._selectors[0]._selector.value = False
+    mocker.stopall()
+    isel_b = ImageSelect(directory=data_dir)
+    for selector in isel_b._selectors:
+        selector._selector.value = False
+
+    _press_go(combiner)
+
+    assert "does not match" in combiner.message
+    assert combiner.manifest_path is None
+    assert list(destination.iterdir()) == []
+    _assert_unlockable(combiner)
+
+
+def test_vanished_checked_frame_is_refused(mixed_dirs):
+    """A checked frame deleted after the selector was made stops the run.
+
+    Without apply_to the missing frame used to be listed as included in
+    the manifest although it was never combined; with apply_to it was
+    reported as not matching. Either way the honest answer is to refuse
+    and name the file.
+    """
+    data_dir, destination = mixed_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_combiner(isel, destination)
+    (data_dir / LIGHTS[1]).unlink()
+
+    _press_go(combiner)
+
+    assert LIGHTS[1] in combiner.message
+    assert "no longer" in combiner.message
+    assert combiner.manifest_path is None
+    assert list(destination.iterdir()) == []
+    _assert_unlockable(combiner)
+
+
+def test_done_message_warns_when_selector_cannot_save(mixed_dirs):
+    """The combiner repeats the selector's caveat in its own message.
+
+    A selector that could not read or save its file shows a warning in its
+    own cell, which the user may not be looking at when the combination
+    finishes, so the "Done" message must carry the caveat too.
+    """
+    data_dir, destination = mixed_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_combiner(isel, destination)
+    isel._can_save = False
+
+    _press_go(combiner)
+
+    assert "Done." in combiner.message
+    assert "could not read or save" in combiner.message
+
+
+def test_interrupted_combine_leaves_widget_unlockable(mixed_dirs, mocker):
+    """Interrupting the kernel during a combination does not lock the widget.
+
+    ``KeyboardInterrupt`` is not an ``Exception``, so it needs catching by
+    name for reducer to get as far as showing "Unlock settings" again.
+    """
+    data_dir, destination = mixed_dirs
+    isel = ImageSelect(directory=data_dir)
+    combiner = _make_combiner(isel, destination)
+    mocker.patch("reducer.astro_gui.Combiner.action",
+                 side_effect=KeyboardInterrupt)
+
+    _press_go(combiner)
+
+    assert isinstance(combiner.last_error, KeyboardInterrupt)
+    assert combiner.manifest_path is None
     _assert_unlockable(combiner)
 
 

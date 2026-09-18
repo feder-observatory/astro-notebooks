@@ -48,15 +48,40 @@ def test_atomic_write_new_file_mode_follows_umask(tmp_path, umask_022):
 
 
 @posix_only
-def test_atomic_write_rewrite_mode_follows_umask(tmp_path, umask_022):
-    """Rewriting a file this function created keeps the umask-derived mode."""
-    target = tmp_path / 'image_selection.json'
+def test_atomic_write_widens_owner_only_file(tmp_path, umask_022):
+    """Rewriting a 0600 file left by an older version makes it readable.
 
-    _atomic_write_json(target, {'a.fit': True})
+    ``tempfile.mkstemp`` made every selection file owner-only, and copying
+    that mode on each rewrite would keep it so forever. The rewrite adds
+    the permissions a new file would get.
+    """
+    target = tmp_path / 'image_selection.json'
+    target.write_text('{}')
+    target.chmod(0o600)
+
     _atomic_write_json(target, {'a.fit': False})
 
     assert _mode(target) == 0o644
     assert json.loads(target.read_text()) == {'a.fit': False}
+
+
+def test_atomic_write_survives_chmod_and_fsync_refusal(tmp_path, mocker):
+    """A file system that refuses chmod and fsync still gets the file.
+
+    Some network and FUSE mounts raise for both; they are best effort and
+    must not turn into a failed save.
+    """
+    target = tmp_path / 'image_selection.json'
+    target.write_text('{}')
+    mocker.patch('astro_notebooks.image_selector.os.chmod',
+                 side_effect=PermissionError('chmod refused'))
+    mocker.patch('astro_notebooks.image_selector.os.fsync',
+                 side_effect=OSError('fsync refused'))
+
+    _atomic_write_json(target, {'a.fit': True})
+
+    assert json.loads(target.read_text()) == {'a.fit': True}
+    assert [p.name for p in tmp_path.iterdir()] == ['image_selection.json']
 
 
 @posix_only

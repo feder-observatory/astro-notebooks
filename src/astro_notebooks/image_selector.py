@@ -2,6 +2,7 @@ import html
 import json
 import os
 import secrets
+import shutil
 import traceback
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -122,8 +123,14 @@ def _atomic_write_json(path, contents):
     a half-written file. The temporary file is removed if anything fails.
 
     A new file gets the permissions any ordinary new file would (set by
-    the process umask); rewriting an existing file keeps that file's
-    permissions.
+    the process umask). Rewriting an existing file keeps that file's
+    permissions and adds any that a new file would get, so a file left
+    readable by its owner only by an older version becomes readable like
+    any other file.
+
+    Syncing to disk and setting the permissions are best effort: some
+    network and FUSE file systems refuse them, and that must not stop the
+    selection being saved.
     """
     path = Path(path)
     tmp_name = path.parent / f'{path.name}.{secrets.token_hex(4)}.tmp'
@@ -134,11 +141,17 @@ def _atomic_write_json(path, contents):
         with os.fdopen(handle, 'w') as f:
             json.dump(contents, f, indent=2, sort_keys=True)
             f.flush()
-            os.fsync(f.fileno())
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         try:
-            os.chmod(tmp_name, path.stat().st_mode & 0o7777)
-        except FileNotFoundError:
-            # No existing file, so the umask-derived mode stands.
+            # The temporary file's own mode is what the umask allows.
+            new_mode = tmp_name.stat().st_mode | path.stat().st_mode
+            os.chmod(tmp_name, new_mode & 0o7777)
+        except OSError:
+            # No existing file, or a file system that refuses chmod; the
+            # umask-derived mode stands.
             pass
         os.replace(tmp_name, path)
     except BaseException:
@@ -407,10 +420,10 @@ class ImageSelect(ipw.VBox):
         # written, so that a selection saved earlier is never overwritten
         # by one that was not restored from it.
         self._can_save = True
-        # True while the latest change of a checkbox has not reached the
-        # selection file; SelectedCombiner uses it to tell a failed save
-        # from a selector that has been replaced.
-        self._last_save_failed = False
+        # What this widget last wrote to the selection file, or None.
+        # SelectedCombiner uses it to tell a failed save (the file still
+        # holds this) from a file that something else has written since.
+        self._last_saved = None
         self._save_problem = ''
         self._message = ipw.HTML()
         self._message.layout.display = 'none'
@@ -486,7 +499,6 @@ class ImageSelect(ipw.VBox):
         try:
             self.save_selection()
         except OSError as err:
-            self._last_save_failed = True
             self._show_message(
                 f'This change could NOT be saved: '
                 f'{html.escape(repr(err))}. The selection '
@@ -494,7 +506,6 @@ class ImageSelect(ipw.VBox):
                 f'Saving will be tried again at the next change.',
                 error=True)
         else:
-            self._last_save_failed = False
             self._show_message('')
 
     @property
@@ -546,6 +557,7 @@ class ImageSelect(ipw.VBox):
                      for fname, selector in zip(self._im_file_names,
                                                 self._selectors)}
         _atomic_write_json(self.selection_path, selection)
+        self._last_saved = selection
 
     def _read_selection(self):
         """
@@ -615,9 +627,19 @@ class ImageSelect(ipw.VBox):
         bad = [name for name, value in saved.items()
                if not isinstance(value, bool)]
         if bad:
+            # The save that follows rewrites these entries as true, so keep
+            # what the file said.
+            backup = self.selection_path.with_name(
+                self.selection_path.name + '.bak')
+            try:
+                shutil.copyfile(self.selection_path, backup)
+            except OSError as err:
+                self._stop_saving(err)
+                return {}
             warnings.warn(
                 f'Ignoring entries in {self.selection_path} whose value is '
-                f'not true or false, and including those images: {bad}',
+                f'not true or false, and including those images: {bad}. '
+                f'The file as it was has been copied to {backup.name}.',
                 stacklevel=2)
             saved = {name: value for name, value in saved.items()
                      if name not in bad}
@@ -939,23 +961,23 @@ class SelectedCombiner(Combiner):
         bool
             ``True`` if the selection file beside the data differs from the
             state of the checkboxes in the selector this widget was made
-            with. Always ``False`` if the selector cannot save its
-            selection or the file cannot be read, because then the two are
-            not expected to match.
+            with, and also from what that selector last wrote. Always
+            ``False`` if the selector cannot save its selection or the
+            file cannot be read, because then the two are not expected to
+            match; `_combine_selected` says so in its message instead.
 
         Notes
         -----
         Every change of a checkbox is saved at once, so the two only differ
         if something else has written the file since: usually a newer
         selector made by re-running the selector's cell, which is the one
-        the user is looking at.
+        the user is looking at. If the selector's latest save failed, the
+        file still holds what the selector wrote before that, which is not
+        stale: the selector has already told the user about the failed
+        save, and the checkboxes are what the user sees.
         """
         isel = self._image_select
         if not getattr(isel, '_can_save', True):
-            return False
-        if getattr(isel, '_last_save_failed', False):
-            # The selector has already told the user that its latest change
-            # was not saved; the checkboxes are what the user sees.
             return False
         on_disk = self._selection_on_disk()
         if on_disk is None:
@@ -963,7 +985,7 @@ class SelectedCombiner(Combiner):
         current = {fname: bool(selector._selector.value)
                    for fname, selector in zip(isel._im_file_names,
                                               isel._selectors)}
-        return on_disk != current
+        return on_disk not in (current, getattr(isel, '_last_saved', None))
 
     def action(self):
         """
@@ -978,7 +1000,7 @@ class SelectedCombiner(Combiner):
         self.last_traceback = None
         try:
             self._combine_selected()
-        except Exception as err:
+        except (Exception, KeyboardInterrupt) as err:
             self._show_failure('Something went wrong before the images '
                                'were combined, and no manifest was '
                                'written:', err)
@@ -1010,25 +1032,35 @@ class SelectedCombiner(Combiner):
                 f'this cell too, then try again.', error=True)
             return
 
+        missing = [fname for fname in selected
+                   if not (Path(self._image_select.path) / fname).exists()]
+        if missing:
+            self._show_message(
+                f'Nothing was combined. These checked images are no longer '
+                f'in {self._image_select.path}: '
+                f'{html.escape(", ".join(missing))}. Run the cell that '
+                f'makes the image selector again, then this cell, and try '
+                f'again.', error=True)
+            return
+
         self._show_message('')
         collection = ImageFileCollection(location=self._image_select.path,
                                          filenames=selected)
         # Only the checked frames that match apply_to get combined, so only
-        # those may be recorded as included.
+        # those may be recorded as included. With no apply_to this is every
+        # checked frame the collection could read.
         apply_to = self.apply_to if self._apply_to else {}
-        to_combine = list(selected)
-        if apply_to:
-            to_combine = list(collection.files_filtered(**apply_to))
-            if not to_combine:
-                wanted = ', '.join(f'{k}={v}' for k, v in apply_to.items())
-                self._show_message(
-                    f'None of the checked images match {wanted}, so '
-                    f'nothing was combined. Check at least one such image, '
-                    f'press "Unlock settings" and try again.', error=True)
-                return
-            if len(to_combine) != len(selected):
-                collection = ImageFileCollection(
-                    location=self._image_select.path, filenames=to_combine)
+        to_combine = list(collection.files_filtered(**apply_to))
+        if not to_combine:
+            wanted = ', '.join(f'{k}={v}' for k, v in apply_to.items())
+            self._show_message(
+                f'None of the checked images match {wanted or "the settings"}, '
+                f'so nothing was combined. Check at least one such image, '
+                f'press "Unlock settings" and try again.', error=True)
+            return
+        if len(to_combine) != len(selected):
+            collection = ImageFileCollection(
+                location=self._image_select.path, filenames=to_combine)
         # reducer offers no public way to replace the collection, and the
         # group-by widget holds its own reference to it; see Notes above.
         self._image_source = collection
@@ -1036,7 +1068,7 @@ class SelectedCombiner(Combiner):
 
         try:
             super().action()
-        except Exception as err:
+        except (Exception, KeyboardInterrupt) as err:
             self._show_failure('The combination failed, and no manifest '
                                'was written:', err)
             return
@@ -1052,11 +1084,16 @@ class SelectedCombiner(Combiner):
                 f'could not be written:', err)
             return
 
-        n_total = len(self._image_select._im_file_names)
-        done = (f'Done. {len(to_combine)} of {n_total} images were combined; '
-                f'they are listed in {self.manifest_path}.')
+        done = (f'Done. {len(to_combine)} of the {len(selected)} checked '
+                f'images were combined; they are listed in '
+                f'{self.manifest_path}.')
         n_skipped = len(selected) - len(to_combine)
         if n_skipped:
             done += (f' {n_skipped} checked image(s) did not match '
                      f'apply_to and were left out.')
+        if not getattr(self._image_select, '_can_save', True):
+            done += (f' <b>Note:</b> the image selector could not read or '
+                     f'save {self._image_select.selection_path}, so the '
+                     f'checkboxes as shown were used; they may differ from '
+                     f'a selection saved earlier.')
         self._show_message(done)
