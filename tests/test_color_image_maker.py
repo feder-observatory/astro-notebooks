@@ -208,6 +208,25 @@ def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch
     assert rgb.shape[:2] == IMAGE_SHAPE
 
 
+def test_save_writes_the_images_loaded_now(maker, tmp_path, monkeypatch):
+    """Saving writes the object that is loaded, not one loaded earlier.
+
+    The save tab used to keep the full size image it made when it was
+    opened. Loading another directory while the tab was showing left that
+    image in place, so the first object's pixels were written under the
+    second object's name.
+    """
+    monkeypatch.chdir(tmp_path)
+    maker.widget.selected_index = 2
+    other_dir = _write_combined_images(tmp_path / "other", "ngc 7331", seed=7)
+
+    maker.image_directory = str(other_dir)
+    maker.widget.children[2].children[1].children[0].click()
+
+    saved = np.asarray(Image.open(tmp_path / "ngc 7331--color.png"))
+    np.testing.assert_array_equal(saved, maker._full_res_rgb())
+
+
 def test_setting_image_directory_reloads(maker, tmp_path):
     """Assigning ``image_directory`` loads the images from the new directory.
 

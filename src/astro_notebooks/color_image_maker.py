@@ -361,7 +361,7 @@ def reduced_png_bytes(rgb, factor=4):
         The PNG, ready for an `ipywidgets.Image`.
     """
     buffer = io.BytesIO()
-    Image.fromarray(rgb, mode='RGB').reduce(factor).save(buffer, format='png')
+    Image.fromarray(rgb).reduce(factor).save(buffer, format='png')
     return buffer.getvalue()
 
 
@@ -519,13 +519,9 @@ class ColorImageMaker:
         save_button = ipw.Button(description='Save image', button_style='success')
         save_status_label = ipw.Label('')
 
-        # Cache the last full-resolution composite so save doesn't recompute it
-        cached = {'full_res_rgb': None}
-
         def refresh():
             status_html.value = '<p style="padding:10px 0">Generating full resolution image…</p>'
-            cached['full_res_rgb'] = self._full_res_rgb()
-            full_res_display.value = reduced_png_bytes(cached['full_res_rgb'])
+            full_res_display.value = reduced_png_bytes(self._full_res_rgb())
             status_html.value = ''
 
         def _reset_save_button():
@@ -544,7 +540,10 @@ class ColorImageMaker:
                 save_status_label.value = f'{filename} already exists. Click again to overwrite.'
                 return
 
-            Image.fromarray(cached['full_res_rgb'], mode='RGB').save(filename)
+            # The full size image is made again here rather than kept from
+            # when the tab was opened: it takes half a second, and keeping
+            # it would hold 50 MB for as long as the widget lives.
+            Image.fromarray(self._full_res_rgb()).save(filename)
             save_status_label.value = f'Saved: {filename}'
             _reset_save_button()
 
