@@ -410,7 +410,33 @@ class ImageSelect(ipw.VBox):
         _atomic_write_json(self.selection_path, selection)
 
     def _read_selection(self):
-        """Saved selection, or an empty mapping if there is none to read."""
+        """
+        Read the saved selection.
+
+        Returns
+        -------
+        dict
+            Mapping of file name to ``True`` (included) or ``False``. It is
+            empty if there is no selection file, or if the file cannot be
+            read or does not hold a mapping.
+
+        Warns
+        -----
+        UserWarning
+            If the file cannot be read or does not hold a mapping, in which
+            case all of it is ignored, or if some of its values are not
+            ``true`` or ``false``, in which case only those entries are
+            ignored.
+
+        Notes
+        -----
+        Entries with a value that is not a real boolean are dropped one at
+        a time rather than rejecting the whole file. ``__init__`` saves the
+        selection right after restoring it, so rejecting the whole file
+        would throw away every other choice in it. A dropped entry means
+        that image is included, which is the default for any image with no
+        entry.
+        """
         try:
             with open(self.selection_path) as f:
                 saved = json.load(f)
@@ -431,18 +457,33 @@ class ImageSelect(ipw.VBox):
                 stacklevel=2)
             return {}
 
+        # bool("false") is True, so anything that is not a real boolean
+        # must not be allowed through to the checkboxes.
+        bad = [name for name, value in saved.items()
+               if not isinstance(value, bool)]
+        if bad:
+            warnings.warn(
+                f'Ignoring entries in {self.selection_path} whose value is '
+                f'not true or false, and including those images: {bad}',
+                stacklevel=2)
+            saved = {name: value for name, value in saved.items()
+                     if name not in bad}
+
         return saved
 
     def _restore_selection(self):
-        """Set the checkboxes from the saved selection, if there is one.
+        """
+        Set the checkboxes from the saved selection, if there is one.
 
-        Files with no saved entry default to checked (included).
+        Notes
+        -----
+        Images with no saved entry are left checked (included).
         """
         saved = self._read_selection()
         if not saved:
             return
         for fname, selector in zip(self._im_file_names, self._selectors):
-            selector._selector.value = bool(saved.get(fname, True))
+            selector._selector.value = saved.get(fname, True)
 
     def make_thumbnails(self, thumb_dir=None):
         """

@@ -400,6 +400,37 @@ def test_selection_file_of_wrong_type_ignored(fits_dir):
     assert w.selected_files == [f"image-{i:03d}.fit" for i in range(N_IMAGES)]
 
 
+def test_selection_entry_with_non_boolean_value_ignored(fits_dir):
+    """One wrongly typed value is dropped without losing the other choices.
+
+    A hand-edited ``"false"`` is a string, and ``bool("false")`` is True,
+    so without a check a rejected frame would quietly come back. Only that
+    entry is ignored, with a warning that names it: the frame is included,
+    the valid entries are still restored, and the file is rewritten with
+    real booleans. Rejecting the whole file instead would wipe every other
+    choice, because the selection is saved again right after it is
+    restored.
+    """
+    path = fits_dir / SELECTION_FILE_NAME
+    path.write_text(json.dumps({
+        "image-000.fit": "false",
+        "image-001.fit": False,
+        "image-002.fit": True,
+        "image-003.fit": False,
+    }))
+    with pytest.warns(UserWarning, match="image-000.fit"):
+        w = ImageSelect(directory=fits_dir)
+
+    assert w.selected_files == [f"image-{i:03d}.fit" for i in (0, 2, 4)]
+    assert _selection_json(fits_dir) == {
+        "image-000.fit": True,
+        "image-001.fit": False,
+        "image-002.fit": True,
+        "image-003.fit": False,
+        "image-004.fit": True,
+    }
+
+
 def test_collection_from_selected_files(fits_dir):
     """``selected_files`` can be used directly to make a collection.
 
