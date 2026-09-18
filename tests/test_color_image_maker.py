@@ -28,6 +28,7 @@ from astro_notebooks.color_image_maker import (
     block_mean_band,
     iter_bands,
     preview_plane,
+    read_frame,
     reduced_png_bytes,
     rgb_uint8,
     scaled_band,
@@ -658,3 +659,19 @@ def test_one_background_fit_serves_the_preview_and_the_file(maker):
     )
     saved = maker._full_res_rgb()
     np.testing.assert_array_equal(saved[:, :, 1], (full_size * 255).astype(np.uint8))
+
+
+def test_read_frame_gives_the_image_and_its_header(combined_dir):
+    """A frame read band by band is the frame the file holds.
+
+    The file is big-endian, and the frames are kept as native float32
+    because they are the only full size arrays there are.
+    """
+    path = combined_dir / "combined_light_filter_V.fit"
+
+    frame, header = read_frame(str(path))
+
+    assert frame.dtype == np.float32
+    assert frame.dtype.byteorder in "=|"
+    assert header["OBJECT"] == "m 101"
+    np.testing.assert_array_equal(frame, fits.getdata(str(path)))

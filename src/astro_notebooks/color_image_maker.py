@@ -149,6 +149,34 @@ def block_mean(image, factor=REDUCE):
     return out
 
 
+def read_frame(path):
+    """
+    Read one frame from a FITS file, a band of rows at a time.
+
+    The file holds big-endian floats, so reading it in one go would put
+    a whole frame in the file's own type in memory beside the array that
+    keeps it. A band at a time costs a band.
+
+    Parameters
+    ----------
+    path : str
+        A FITS file with its image in the primary HDU.
+
+    Returns
+    -------
+    frame : `numpy.ndarray`
+        The image, as float32 in this machine's byte order.
+    header : `astropy.io.fits.Header`
+        The header of the primary HDU.
+    """
+    with fits.open(path, memmap=True) as hdu_list:
+        hdu = hdu_list[0]
+        frame = np.empty(hdu.shape, dtype=np.float32)
+        for start, stop in iter_bands(hdu.shape[0]):
+            frame[start:stop] = hdu.section[start:stop]
+        return frame, hdu.header
+
+
 def blank_missing_pixels(frames):
     """
     Blank, in every frame, each pixel that is missing from any one of them.
@@ -555,11 +583,7 @@ class ColorImageMaker:
             path = os.path.join(
                 self.image_directory, f'combined_light_filter_{filter_name}.fit'
             )
-            data, header = fits.getdata(path, header=True, memmap=False)
-            # Native byte order float32: the frames are the only full size
-            # arrays kept, so they are kept in the smallest type the data
-            # came in.
-            self.data[color] = np.asarray(data, dtype=np.float32)
+            self.data[color], header = read_frame(path)
             if color == 'blue':
                 self.object_name = header['OBJECT']
 
