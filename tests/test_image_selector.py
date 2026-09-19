@@ -752,6 +752,68 @@ def test_showing_another_frame_replaces_the_first(star_fits_dir,
         assert len(call.args) == 1
 
 
+def _shown_tiles(image_select):
+    """Names of the tiles that are marked as being in the viewer."""
+    return [tile._fname for tile in image_select._selectors if tile.shown]
+
+
+def test_no_tile_is_marked_before_a_frame_is_shown(star_fits_dir,
+                                                   viewer_factory):
+    """Nothing is in the viewer until a thumbnail is clicked, so no tile is
+    marked as shown and every tile has the ordinary border.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    assert _shown_tiles(w) == []
+    for tile in w._selectors:
+        assert tile.layout.border_top == ImageWithSelector.TILE_BORDER
+
+
+def test_tile_of_the_frame_in_the_viewer_is_marked(star_fits_dir,
+                                                   viewer_factory):
+    """The tile of the frame in the viewer, and no other, has the heavier
+    border, and the mark moves when another frame is shown.
+
+    The marked tile must take up the same room as the others, or every
+    tile after it would move when a thumbnail is clicked, so its border
+    and padding together are as wide as an ordinary tile's.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w._show_frame(2)
+    assert _shown_tiles(w) == ["stars-002.fit"]
+    shown = w._selectors[2]
+    for side in ('top', 'bottom', 'left', 'right'):
+        assert (getattr(shown.layout, f'border_{side}') ==
+                ImageWithSelector.SHOWN_TILE_BORDER)
+    assert shown.layout.padding == ImageWithSelector.SHOWN_TILE_PADDING
+
+    w.show_frame("stars-004.fit")
+    assert _shown_tiles(w) == ["stars-004.fit"]
+    assert w._selectors[2].layout.border_top == ImageWithSelector.TILE_BORDER
+    assert w._selectors[2].layout.padding == ImageWithSelector.TILE_PADDING
+
+    def width(css):
+        return int(css.split('px')[0])
+
+    assert (width(ImageWithSelector.SHOWN_TILE_BORDER) +
+            width(ImageWithSelector.SHOWN_TILE_PADDING) ==
+            width(ImageWithSelector.TILE_BORDER) +
+            width(ImageWithSelector.TILE_PADDING))
+
+
+def test_tile_is_not_marked_when_the_frame_cannot_be_shown(star_fits_dir,
+                                                           viewer_factory,
+                                                           mock_viewer):
+    """If loading a frame fails, the mark stays on the frame that is still
+    in the viewer rather than moving to the one that could not be shown.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w.show_frame("stars-001.fit")
+    mock_viewer.load_image.side_effect = OSError("cannot read the file")
+    with pytest.raises(OSError):
+        w.show_frame("stars-003.fit")
+    assert _shown_tiles(w) == ["stars-001.fit"]
+
+
 def test_details_show_star_cutouts(star_fits_dir, viewer_factory):
     """The details panel shows a close-up of every star measured on the frame.
 

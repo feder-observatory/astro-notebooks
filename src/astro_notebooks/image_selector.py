@@ -487,6 +487,11 @@ class ImageWithSelector(ipw.VBox):
     TILE_BORDER = '1px solid #9e9e9e'
     TILE_PADDING = '6px'
     TILE_MARGIN = '4px'
+    # The tile whose frame is in the viewer gets a heavier, coloured border.
+    # Its padding is smaller by the extra width of the border so that the
+    # tile stays the same size and the tiles after it do not move.
+    SHOWN_TILE_BORDER = '4px solid #1976d2'
+    SHOWN_TILE_PADDING = '3px'
 
     def __init__(self, image_png, *args, width="200px", fname="", **kwargs):
         super().__init__(*args, **kwargs)
@@ -530,11 +535,25 @@ class ImageWithSelector(ipw.VBox):
                                         self._star_cutout, self.select_box])
         self.children = [self.image_display, self.mobox]
         self.layout.width = width
-        # Box each tile in so that it is obvious which checkbox goes with
-        # which thumbnail.
-        self.layout.border = self.TILE_BORDER
-        self.layout.padding = self.TILE_PADDING
         self.layout.margin = self.TILE_MARGIN
+        # Box each tile in so that it is obvious which checkbox goes with
+        # which thumbnail. Setting ``shown`` draws the border.
+        self.shown = False
+
+    @property
+    def shown(self):
+        """bool : Whether this tile is marked as the frame in the viewer."""
+        return self._shown
+
+    @shown.setter
+    def shown(self, value):
+        self._shown = bool(value)
+        if self._shown:
+            self.layout.border = self.SHOWN_TILE_BORDER
+            self.layout.padding = self.SHOWN_TILE_PADDING
+        else:
+            self.layout.border = self.TILE_BORDER
+            self.layout.padding = self.TILE_PADDING
 
     def set_metrics(self, metrics, cutout_png=None):
         """Show this frame's star measurements on the tile.
@@ -1191,6 +1210,11 @@ class ImageSelect(ipw.VBox):
             # file name, but they can be read with a unit supplied.
             self.viewer.load_image(CCDData.read(path, unit='adu'))
         self.details.children = self._details(index)
+        # Mark the tile of the frame that is now in the viewer, and only
+        # that one, so that it is obvious which thumbnail is being shown.
+        for tile_index, tile in enumerate(self._selectors):
+            if tile.shown != (tile_index == index):
+                tile.shown = tile_index == index
 
     def _details(self, index):
         """Widgets describing one frame for the panel under the viewer."""
