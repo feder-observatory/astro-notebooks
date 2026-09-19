@@ -460,6 +460,11 @@ class ColorImageMaker:
         # One plane of the preview per colour, each of them a pass over a
         # whole frame, so they are kept until something changes them.
         self.preview_planes = {}
+        # Whether what the preview shows is out of date. It is drawn only
+        # while its tab is on screen, and brought up to date when the tab
+        # is opened, so that a slider on the first tab does not pay for a
+        # pass over a frame to draw something nobody is looking at.
+        self._preview_stale = True
 
         self._build_widgets()
         self._load_data()
@@ -477,7 +482,7 @@ class ColorImageMaker:
             self._load_data()
             # Loading draws nothing, which is right for a new widget, but
             # here the old object may already be on screen.
-            self._update_preview()
+            self._remake_preview()
             if self.widget.selected_index == 2:
                 self._refresh_save()
 
@@ -800,8 +805,8 @@ class ColorImageMaker:
         Returns
         -------
         callable
-            Observer that gives the viewer the new cuts and remakes that
-            colour of the preview.
+            Observer that gives the viewer the new cuts and marks that
+            colour of the preview as out of date.
         """
         def observer(change):
             self.image_widgets[color].set_cuts(ManualInterval(*change['new']))
@@ -810,24 +815,30 @@ class ColorImageMaker:
 
     def _remake_preview(self, *colors):
         """
-        Make some colours of the preview again and redraw it.
+        Throw away some colours of the preview, and redraw it if it is seen.
 
         The cuts, the stretch, the background and the weight in the mix
         are all applied before the image is averaged, so a change to any
-        of them means another pass over the frame.
+        of them means another pass over the frame. That pass is made now
+        only if the preview's tab is the one on screen; otherwise it is
+        left until the tab is opened.
 
         Parameters
         ----------
         *colors : str
             The colours, from `COLORS`, whose planes are out of date.
+            None at all still redraws, for when the planes have already
+            been thrown away.
         """
         for color in colors:
             self.preview_planes.pop(color, None)
-        self._update_preview()
+        self._preview_stale = True
+        if self.widget.selected_index == 1:
+            self._update_preview()
 
     def _stretch_observer(self, change):
         """
-        Give every viewer the chosen stretch and remake the whole preview.
+        Give every viewer the chosen stretch; the whole preview is out of date.
 
         Parameters
         ----------
@@ -854,17 +865,23 @@ class ColorImageMaker:
             # The inline backend closes the figure when it shows it; any
             # other backend would keep one per slider move.
             plt.close(fig)
+        self._preview_stale = False
 
     def _on_tab_change(self, change):
         """
-        Build the finished image when the Save tab is opened.
+        Bring the tab that has just been opened up to date.
+
+        The preview is drawn if anything has changed since it was last
+        drawn, and the finished image is built for the Save tab.
 
         Parameters
         ----------
         change : dict
             The traitlets change, whose ``'new'`` is the tab now shown.
         """
-        if change['new'] == 2:
+        if change['new'] == 1 and self._preview_stale:
+            self._update_preview()
+        elif change['new'] == 2:
             self._refresh_save()
 
     def _on_subtract_change(self, change):

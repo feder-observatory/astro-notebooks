@@ -120,9 +120,10 @@ def test_construction_loads_images(maker):
 def test_level_slider_sets_cuts(maker):
     """Moving one channel's level slider sets that viewer's cuts.
 
-    That channel of the preview is made again with the new cuts, and the
-    other two are left as they were rather than being recomputed, which
-    would mean two more passes over a frame for nothing.
+    That channel of the preview is thrown away, to be made again with
+    the new cuts when the preview is next looked at, and the other two
+    are left as they were rather than being recomputed, which would mean
+    two more passes over a frame for nothing.
     """
     green_before = maker._preview_plane("green")
     red_before = maker._preview_plane("red").copy()
@@ -131,6 +132,11 @@ def test_level_slider_sets_cuts(maker):
 
     cuts = maker.image_widgets["red"].get_cuts()
     assert (cuts.vmin, cuts.vmax) == (200.0, 900.0)
+    # The preview is not on screen, so the red plane is only dropped.
+    assert "red" not in maker.preview_planes
+
+    maker.widget.selected_index = 1
+
     assert not np.allclose(red_before, maker.preview_planes["red"])
     assert maker.preview_planes["red"].shape == REDUCED_SHAPE
     # Only the red channel should have been touched.
@@ -145,15 +151,17 @@ def test_stretch_chooser_sets_stretch(maker, name, stretch_class):
 
     The dropdown holds names, but astrowidgets 0.6 only accepts stretch
     objects, so each name must map to the right class. The stretch is
-    part of every colour of the preview, so all three are made again.
+    part of every colour of the preview, so all three are out of date
+    and come out different when they are next made.
     """
     before = {c: maker._preview_plane(c).copy() for c in COLORS}
 
     maker.stretch_chooser.value = name
 
+    assert maker.preview_planes == {}
     for color, viewer in maker.image_widgets.items():
         assert isinstance(viewer.get_stretch(), stretch_class)
-        assert not np.allclose(before[color], maker.preview_planes[color])
+        assert not np.allclose(before[color], maker._preview_plane(color))
 
 
 def test_background_subtraction_keeps_cuts_and_stretch(maker):
@@ -232,9 +240,10 @@ def test_setting_image_directory_redraws_what_is_on_screen(maker, tmp_path):
     """Loading another directory replaces the images already being shown.
 
     Loading draws nothing, because a new widget has nothing on screen yet.
-    After a reload, though, the preview and, if its tab is open, the
-    picture on the save tab were still of the object loaded before, even
-    though saving wrote the new one.
+    After a reload, though, the picture on the save tab, if that tab was
+    open, was still of the object loaded before, even though saving wrote
+    the new one. The preview is not on screen here, so it is only marked
+    as out of date, and shows the new object when its tab is opened.
     """
     maker.widget.selected_index = 2
     shown = maker.widget.children[2].children[3]
@@ -245,8 +254,65 @@ def test_setting_image_directory_redraws_what_is_on_screen(maker, tmp_path):
     maker.image_directory = str(other_dir)
 
     assert shown.value != png_before
+    assert maker.preview_planes == {}
+
+    maker.widget.selected_index = 1
+
     assert set(maker.preview_planes) == set(COLORS)
     assert not np.allclose(red_before, maker.preview_planes["red"])
+
+
+def test_setting_image_directory_redraws_a_preview_that_is_on_screen(
+    maker, tmp_path
+):
+    """Loading another directory while the preview is open redraws it.
+
+    With the preview's tab on screen there is no tab change to wait for,
+    so the new object has to be drawn as soon as it is loaded.
+    """
+    maker.widget.selected_index = 1
+    red_before = maker.preview_planes["red"].copy()
+    other_dir = _write_combined_images(tmp_path / "other", "ngc 7331", seed=7)
+
+    maker.image_directory = str(other_dir)
+
+    assert set(maker.preview_planes) == set(COLORS)
+    assert not np.allclose(red_before, maker.preview_planes["red"])
+
+
+def test_preview_is_drawn_only_while_its_tab_is_open(maker, monkeypatch):
+    """The preview is drawn when it can be seen, and not otherwise.
+
+    Every drawing is a pass over a full size frame for each colour that
+    has changed, and a matplotlib figure. On the first tab that used to
+    be paid on every move of a level slider, for a picture on another
+    tab. Now nothing is drawn until the preview's tab is opened, which
+    also means the tab is no longer blank the first time it is opened;
+    it is not drawn again on coming back to it with nothing changed; and
+    while it is open a slider redraws it straight away.
+    """
+    drawn = []
+    update = maker._update_preview
+    monkeypatch.setattr(
+        maker, "_update_preview", lambda: (drawn.append(1), update())[1]
+    )
+
+    maker.level_sliders["red"].value = (200.0, 900.0)
+    maker.stretch_chooser.value = "sqrt"
+    maker.subtract_bkgd_checkbox.value = True
+    assert drawn == []
+    assert maker.preview_planes == {}
+
+    maker.widget.selected_index = 1
+    assert len(drawn) == 1
+    assert set(maker.preview_planes) == set(COLORS)
+
+    maker.widget.selected_index = 0
+    maker.widget.selected_index = 1
+    assert len(drawn) == 1
+
+    maker.r_slider.value = 0.8
+    assert len(drawn) == 2
 
 
 def test_setting_image_directory_reloads(maker, tmp_path):
@@ -662,7 +728,7 @@ def test_preview_is_the_saved_image_averaged(maker):
     maker.stretch_chooser.value = "log"
     maker.g_slider.value = 0.35
 
-    plane = maker.preview_planes["green"]
+    plane = maker._preview_plane("green")
 
     full_size = scaled_band(
         maker.data["green"], ManualInterval(30.0, 800.0), LogStretch(), 0.35
@@ -679,8 +745,9 @@ def test_slider_move_makes_nothing_the_size_of_a_frame(big_maker):
     should cost a small fraction of one frame.
     """
     frame_bytes = big_maker.data["red"].nbytes
-    # Warm up, so that what is measured is the slider move alone.
-    big_maker._update_preview()
+    # With the preview on screen a slider move remakes its plane at once.
+    # Opening it also warms up, so that what is measured is the move alone.
+    big_maker.widget.selected_index = 1
 
     tracemalloc.start()
     try:
@@ -689,6 +756,8 @@ def test_slider_move_makes_nothing_the_size_of_a_frame(big_maker):
     finally:
         tracemalloc.stop()
 
+    # The pass over the frame was made, and is what was measured.
+    assert "red" in big_maker.preview_planes
     assert peak < frame_bytes
 
 
@@ -705,12 +774,12 @@ def test_background_on_then_off_gives_back_the_same_preview(maker):
     frame_before = maker.data["red"].copy()
 
     maker.subtract_bkgd_checkbox.value = True
-    assert not np.allclose(before["red"], maker.preview_planes["red"])
+    assert not np.allclose(before["red"], maker._preview_plane("red"))
 
     maker.subtract_bkgd_checkbox.value = False
 
     for color in COLORS:
-        np.testing.assert_array_equal(before[color], maker.preview_planes[color])
+        np.testing.assert_array_equal(before[color], maker._preview_plane(color))
     np.testing.assert_array_equal(frame_before, maker.data["red"])
 
 
@@ -739,7 +808,7 @@ def test_one_background_fit_serves_the_preview_and_the_file(maker):
         scaling["weight"],
     )
     np.testing.assert_allclose(
-        maker.preview_planes["green"], _block_means(full_size), rtol=1e-6
+        maker._preview_plane("green"), _block_means(full_size), rtol=1e-6
     )
     saved = maker._full_res_rgb()
     np.testing.assert_array_equal(saved[:, :, 1], (full_size * 255).astype(np.uint8))
