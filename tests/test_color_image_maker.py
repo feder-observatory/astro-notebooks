@@ -310,6 +310,18 @@ def ragged_frames():
     return frames
 
 
+def _scalings(intervals, stretch, weights):
+    """Put cuts, a stretch and weights in the form ``rgb_uint8`` takes them.
+
+    That is, for each colour, the keyword arguments that scale it.
+    """
+    return {
+        color: dict(interval=intervals[color], stretch=stretch,
+                    weight=weights[color])
+        for color in COLORS
+    }
+
+
 @pytest.fixture
 def cuts_and_weights():
     """Black and white points and mixer weights, one set per colour.
@@ -518,7 +530,7 @@ def test_saved_image_is_what_the_old_path_wrote(
     frames = {color: ragged_frames[color] for color in COLORS}
     blank_missing_pixels([frames[color] for color in COLORS])
 
-    new = rgb_uint8(frames, intervals, stretch, weights)
+    new = rgb_uint8(frames, _scalings(intervals, stretch, weights))
 
     buffer = io.BytesIO()
     mimg.imsave(buffer, _old_style_rgb(frames, intervals, stretch, weights),
@@ -536,9 +548,8 @@ def test_reduced_png_bytes_is_a_smaller_png(ragged_frames, cuts_and_weights):
     fraction of the memory.
     """
     intervals, weights = cuts_and_weights
-    png = reduced_png_bytes(
-        rgb_uint8(ragged_frames, intervals, LinearStretch(), weights), factor=4
-    )
+    scalings = _scalings(intervals, LinearStretch(), weights)
+    png = reduced_png_bytes(rgb_uint8(ragged_frames, scalings), factor=4)
 
     shown = Image.open(io.BytesIO(png))
     assert shown.format == "PNG"
@@ -667,11 +678,12 @@ def test_one_background_fit_serves_the_preview_and_the_file(maker):
     full_background = np.repeat(
         np.repeat(maker.bkgd_sm["green"], REDUCE, axis=0), REDUCE, axis=1
     )
+    scaling = maker._scaling("green")
     full_size = scaled_band(
         maker.data["green"] - full_background,
         ManualInterval(0.0, 700.0),
-        maker._stretch(),
-        maker._weights()["green"],
+        scaling["stretch"],
+        scaling["weight"],
     )
     np.testing.assert_allclose(
         maker.preview_planes["green"], _block_means(full_size), rtol=1e-6

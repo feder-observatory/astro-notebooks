@@ -261,6 +261,33 @@ def scaled_band(band, interval, stretch, weight, background=None):
     return values
 
 
+def _scaled_rows(image, start, stop, interval, stretch, weight,
+                 background=None):
+    """
+    Turn rows of one full size frame into the values that get displayed.
+
+    Parameters
+    ----------
+    image : `numpy.ndarray`
+        The full size frame of one colour.
+    start, stop : int
+        First row wanted and the row after the last.
+    interval, stretch, weight
+        As for `scaled_band`.
+    background : `numpy.ndarray`, optional
+        Background of the reduced image, to subtract from the frame.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        Values from 0 to 1, one per pixel of those rows.
+    """
+    if background is not None:
+        background = background_band(background, start, stop, image.shape[1])
+    return scaled_band(image[start:stop], interval, stretch, weight,
+                       background=background)
+
+
 def preview_plane(image, interval, stretch, weight, background=None):
     """
     Make one colour plane of the preview from a full size frame.
@@ -293,15 +320,13 @@ def preview_plane(image, interval, stretch, weight, background=None):
     out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
                    dtype=np.float32)
     for start, stop in iter_bands(image.shape[0]):
-        rows = (None if background is None
-                else background_band(background, start, stop, image.shape[1]))
-        scaled = scaled_band(image[start:stop], interval, stretch, weight,
-                             background=rows)
+        scaled = _scaled_rows(image, start, stop, interval, stretch, weight,
+                              background)
         out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(scaled)
     return out
 
 
-def rgb_uint8(frames, intervals, stretch, weights, backgrounds=None):
+def rgb_uint8(frames, scalings):
     """
     Make the image that gets saved, one byte per colour per pixel.
 
@@ -314,14 +339,10 @@ def rgb_uint8(frames, intervals, stretch, weights, backgrounds=None):
     ----------
     frames : dict
         The full size frame of each colour in `COLORS`.
-    intervals : dict
-        The black and white points of each colour.
-    stretch : `astropy.visualization.BaseStretch`
-        The stretch applied to all three colours.
-    weights : dict
-        Where each colour's slider in the mixer sits, 0 to 1.
-    backgrounds : dict, optional
-        Background of the reduced image of each colour, to subtract.
+    scalings : dict
+        How each colour is to be scaled: for each colour a dict of the
+        ``interval``, ``stretch``, ``weight`` and, optionally,
+        ``background`` arguments of `preview_plane`.
 
     Returns
     -------
@@ -332,11 +353,8 @@ def rgb_uint8(frames, intervals, stretch, weights, backgrounds=None):
     out = np.empty(shape + (3,), dtype=np.uint8)
     for start, stop in iter_bands(shape[0]):
         for plane, color in enumerate(COLORS):
-            rows = (None if backgrounds is None
-                    else background_band(backgrounds[color], start, stop,
-                                         shape[1]))
-            scaled = scaled_band(frames[color][start:stop], intervals[color],
-                                 stretch, weights[color], background=rows)
+            scaled = _scaled_rows(frames[color], start, stop,
+                                  **scalings[color])
             out[start:stop, :, plane] = (scaled * 255).astype(np.uint8)
     return out
 
@@ -435,6 +453,9 @@ class ColorImageMaker:
         self.r_slider = self._make_rgb_slider('Red')
         self.g_slider = self._make_rgb_slider('Green')
         self.b_slider = self._make_rgb_slider('Blue')
+        self.mix_sliders = dict(zip(
+            self._colors, [self.r_slider, self.g_slider, self.b_slider]
+        ))
 
         self._build_bw_tab()
         self._build_color_tab()
@@ -497,9 +518,7 @@ class ColorImageMaker:
         # A mixer slider changes one colour of the preview; the sliders and
         # the dropdown on the first tab change one or all three, and their
         # observers redraw the preview themselves.
-        for color, slider in zip(
-            self._colors, [self.r_slider, self.g_slider, self.b_slider]
-        ):
+        for color, slider in self.mix_sliders.items():
             slider.observe(
                 lambda change, color=color: self._remake_preview(color),
                 names='value',
@@ -601,8 +620,10 @@ class ColorImageMaker:
 
         # Give the viewers the cuts the level sliders are set to. The
         # preview planes are made the first time the preview is drawn.
-        for color, interval in self._intervals().items():
-            self.image_widgets[color].set_cuts(interval)
+        for color in self._colors:
+            self.image_widgets[color].set_cuts(
+                ManualInterval(*self.level_sliders[color].value)
+            )
         self.preview_planes.clear()
 
     def _compute_backgrounds(self):
@@ -642,56 +663,31 @@ class ColorImageMaker:
     # Image scaling and rendering
     # ------------------------------------------------------------------
 
-    def _intervals(self):
+    def _scaling(self, color):
         """
-        The black and white points the level sliders are set to.
+        How one colour is to be scaled, as the controls are set now.
+
+        The preview and the image that gets saved both ask here, so that
+        they cannot read the controls differently.
+
+        Parameters
+        ----------
+        color : str
+            One of `COLORS`.
 
         Returns
         -------
         dict
-            A `~astropy.visualization.ManualInterval` for each colour.
+            The ``interval``, ``stretch``, ``weight`` and ``background``
+            arguments of `preview_plane`.
         """
-        return {
-            color: ManualInterval(*self.level_sliders[color].value)
-            for color in self._colors
-        }
-
-    def _stretch(self):
-        """
-        The stretch the dropdown is set to, used for all three colours.
-
-        Returns
-        -------
-        `astropy.visualization.BaseStretch`
-            The chosen stretch.
-        """
-        return self._stretches[self.stretch_chooser.value]
-
-    def _weights(self):
-        """
-        How much of each colour the mixer sliders ask for.
-
-        Returns
-        -------
-        dict
-            A number from 0 to 1 for each colour.
-        """
-        return dict(zip(
-            self._colors,
-            [self.r_slider.value, self.g_slider.value, self.b_slider.value],
-        ))
-
-    def _backgrounds(self):
-        """
-        The background to take off each frame, if the box is ticked.
-
-        Returns
-        -------
-        dict or None
-            The reduced background of each colour, or None when the
-            background is to be left in.
-        """
-        return self.bkgd_sm if self.subtract_bkgd_checkbox.value else None
+        subtract = self.subtract_bkgd_checkbox.value
+        return dict(
+            interval=ManualInterval(*self.level_sliders[color].value),
+            stretch=self._stretches[self.stretch_chooser.value],
+            weight=self.mix_sliders[color].value,
+            background=self.bkgd_sm[color] if subtract else None,
+        )
 
     def _full_res_rgb(self):
         """
@@ -702,8 +698,7 @@ class ColorImageMaker:
         `numpy.ndarray`
             The image, ``(rows, columns, 3)`` of uint8.
         """
-        return rgb_uint8(self.data, self._intervals(), self._stretch(),
-                         self._weights(), backgrounds=self._backgrounds())
+        return rgb_uint8(self.data, {c: self._scaling(c) for c in self._colors})
 
     def _preview_plane(self, color):
         """
@@ -724,11 +719,8 @@ class ColorImageMaker:
             The plane, `REDUCE` times smaller than the frame.
         """
         if color not in self.preview_planes:
-            backgrounds = self._backgrounds()
             self.preview_planes[color] = preview_plane(
-                self.data[color], self._intervals()[color], self._stretch(),
-                self._weights()[color],
-                background=None if backgrounds is None else backgrounds[color],
+                self.data[color], **self._scaling(color)
             )
         return self.preview_planes[color]
 
@@ -791,7 +783,7 @@ class ColorImageMaker:
         comb = np.stack([self._preview_plane(c) for c in self._colors], axis=-1)
         maxes = [round(float(comb[:, :, i].max()), 3) for i in range(3)]
         max_img = max(maxes)
-        r, g, b = self._weights().values()
+        r, g, b = (slider.value for slider in self.mix_sliders.values())
         with self.preview_output:
             self.preview_output.clear_output(wait=True)
             fig, ax = plt.subplots(figsize=(8, 8))
