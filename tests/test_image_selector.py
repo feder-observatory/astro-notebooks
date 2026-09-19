@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -231,12 +233,13 @@ def test_thumb_cache_lives_in_data_dir(fits_dir, tmp_path):
     assert {p.name for p in tmp_path.iterdir()} == {"data"}
 
 
-def test_default_worker_cap_is_four(fits_dir, mocker):
-    """By default the thumbnail thread pool has four workers.
+def test_default_worker_cap_is_two(fits_dir, mocker):
+    """By default the thumbnail thread pool has two workers.
 
     The cap, rather than one thread per CPU, is what keeps peak memory
-    down on a JupyterHub with a per-user limit, so a change to the
-    default should be deliberate.
+    down on a JupyterHub with a per-user limit, and two rather than four
+    is what fits a hub giving each user about a gigabyte and about one
+    core, so a change to the default should be deliberate.
     """
     spy = mocker.patch(
         "astro_notebooks.image_selector.ThreadPoolExecutor",
@@ -244,18 +247,23 @@ def test_default_worker_cap_is_four(fits_dir, mocker):
     )
     ImageSelect(directory=fits_dir)
     assert spy.call_count == 1
-    assert spy.call_args.kwargs["max_workers"] == 4
+    assert spy.call_args.kwargs["max_workers"] == 2
+    assert ImageSelect.DEFAULT_MAX_WORKERS == 2
 
 
 def test_max_workers_kwarg_flows_through(fits_dir, mocker):
-    """``ImageSelect(max_workers=...)`` sets the thread pool size."""
+    """``ImageSelect(max_workers=...)`` sets the thread pool size.
+
+    Asks for three, which is not the default, so that the default being
+    passed through would fail this too.
+    """
     spy = mocker.patch(
         "astro_notebooks.image_selector.ThreadPoolExecutor",
         side_effect=ThreadPoolExecutor,
     )
-    ImageSelect(directory=fits_dir, max_workers=2)
+    ImageSelect(directory=fits_dir, max_workers=3)
     assert spy.call_count == 1
-    assert spy.call_args.kwargs["max_workers"] == 2
+    assert spy.call_args.kwargs["max_workers"] == 3
 
 
 def test_thumbnail_data_matches_whole_frame(tmp_path):
@@ -844,3 +852,20 @@ def test_progress_covers_thumbnails_and_metrics(star_fits_dir, viewer_factory,
     displayed.clear()
     ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     assert displayed == []
+
+
+def test_importing_the_selector_does_not_import_stellarphot():
+    """Opening the selector must not drag the whole of stellarphot in.
+
+    stellarphot pulls in pandas, scikit-learn, astroquery and more, about
+    180 MB and a couple of seconds, which is far too much to spend on a
+    shared JupyterHub with a per-user memory cap. A fresh interpreter is
+    used so that a module imported by another test cannot hide a
+    regression here.
+    """
+    code = ("import sys, astro_notebooks.image_selector; "
+            "print(any(m == 'stellarphot' or m.startswith('stellarphot.') "
+            "for m in sys.modules))")
+    result = subprocess.run([sys.executable, "-c", code],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "False"
