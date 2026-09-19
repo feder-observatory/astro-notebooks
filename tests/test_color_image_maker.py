@@ -27,6 +27,7 @@ from astro_notebooks.color_image_maker import (
     block_mean,
     block_mean_band,
     iter_bands,
+    pixel_noise,
     preview_plane,
     read_frame,
     reduced_png_bytes,
@@ -405,6 +406,37 @@ def test_block_mean_of_a_frame_that_does_not_divide_evenly():
     np.testing.assert_allclose(reduced, _block_means(image), rtol=1e-6)
 
 
+def test_pixel_noise_is_the_noise_of_the_sky_and_not_the_stars():
+    """The noise found is the sky's, whatever else is in the frame.
+
+    The frame has a bright sky with Gaussian noise of a known size, stars
+    much brighter than the noise, an edge with no data, and a shape that
+    is not a whole number of blocks. None of those may move the answer:
+    a star's own shape is not noise, a block with a missing pixel has no
+    scatter to give, and the short blocks at the edges are left out. The
+    sky is bright on purpose, since that is where single precision would
+    lose the scatter in the rounding of the mean.
+    """
+    rng = np.random.default_rng(5)
+    image = rng.normal(40_000.0, 30.0, size=(603, 515)).astype(np.float32)
+    for row, col in rng.integers(20, 500, size=(40, 2)):
+        image[row:row + 4, col:col + 4] += 5000.0
+    image[:, :11] = np.nan
+
+    assert pixel_noise(image) == pytest.approx(30.0, rel=0.03)
+
+
+def test_pixel_noise_of_a_frame_with_no_whole_block_is_zero():
+    """A frame too small, or too empty, to measure gets no noise added.
+
+    Nothing can be said about the noise of a frame smaller than one block
+    or of one with no data in it, and zero leaves the viewers' images as
+    they were rather than filling them with NaN.
+    """
+    assert pixel_noise(np.ones((5, 40), dtype=np.float32)) == 0.0
+    assert pixel_noise(np.full((64, 64), np.nan, dtype=np.float32)) == 0.0
+
+
 def test_block_mean_band_leaves_missing_pixels_missing():
     """A block containing a pixel with no data has no data either.
 
@@ -711,6 +743,95 @@ def test_one_background_fit_serves_the_preview_and_the_file(maker):
     )
     saved = maker._full_res_rgb()
     np.testing.assert_array_equal(saved[:, :, 1], (full_size * 255).astype(np.uint8))
+
+
+def _write_noisy_sky_images(directory, object_name, sky=300.0, noise=30.0):
+    """Write combined images that are a flat sky with Gaussian noise.
+
+    This is the case the viewers on the first tab used to get wrong: a
+    black point set at the level of the sky. The directory is returned.
+    """
+    directory.mkdir()
+    rng = np.random.default_rng(21)
+    for filt in FILTERS:
+        data = rng.normal(sky, noise, size=IMAGE_SHAPE).astype(np.float32)
+        hdu = fits.PrimaryHDU(data)
+        hdu.header["BUNIT"] = "adu"
+        hdu.header["OBJECT"] = object_name
+        hdu.writeto(directory / f"combined_light_filter_{filt}.fit")
+    return directory
+
+
+@pytest.mark.parametrize("subtract,black_point", [(False, 300.0), (True, 0.0)])
+def test_viewer_shows_the_sky_as_bright_as_the_preview_does(
+    tmp_path, subtract, black_point
+):
+    """With the black point on the sky, the viewer and the preview agree.
+
+    The preview applies the cuts and the stretch to pixels that still
+    have their noise and then averages; the viewer is given an averaged
+    image and applies them afterwards. With a log stretch and the black
+    point at the sky level that used to leave the viewer's sky at about
+    a third of the brightness of the preview's, so levels chosen on the
+    first tab gave a different picture on the second. With the noise put
+    back the two agree on average, which the averaged image alone, also
+    checked here, does not.
+
+    The same holds with the background taken off, when the sky and so
+    the black point are at zero. The noise is measured on the frame as
+    it was read, which is the right size either way: the background that
+    comes off is the same across a block, and the noise is the scatter
+    within one.
+    """
+    maker = ColorImageMaker(str(_write_noisy_sky_images(tmp_path / "sky", "sky")))
+    maker.stretch_chooser.value = "log"
+    maker.subtract_bkgd_checkbox.value = subtract
+    cuts = (black_point, black_point + 1200.0)
+    maker.level_sliders["red"].value = cuts
+    # A weight of 0.5 in the mix leaves the preview plane as the plain
+    # stretched image, which is what a viewer shows.
+    assert maker.mix_sliders["red"].value == 0.5
+
+    def shown(image):
+        scaled = LogStretch()(ManualInterval(*cuts)(image))
+        return float(np.clip(scaled, 0, 1).mean())
+
+    preview = float(maker._preview_plane("red").mean())
+    without_noise = maker.data_sm["red"] - maker.noise_sm["red"]
+
+    assert shown(maker.data_sm["red"]) == pytest.approx(preview, rel=0.05)
+    assert shown(without_noise) < 0.5 * preview
+
+
+def test_viewer_noise_is_as_big_as_the_noise_of_the_frame(maker):
+    """What is added to a viewer's image is noise the size of the frame's.
+
+    The image the background is fitted to stays the plain block mean,
+    and what the viewer shows differs from it by noise with the scatter
+    `pixel_noise` finds in the full size frame.
+    """
+    for color in COLORS:
+        np.testing.assert_array_equal(
+            maker.data_sm_raw[color], block_mean(maker.data[color])
+        )
+        added = maker.data_sm[color] - maker.data_sm_raw[color]
+        assert added.std() == pytest.approx(pixel_noise(maker.data[color]), rel=0.05)
+        assert abs(added.mean()) < 0.05 * added.std()
+
+
+def test_loading_the_same_images_again_shows_the_same_noise(combined_dir):
+    """Two widgets made from the same images show identical viewers.
+
+    The noise is made up, but it is seeded, so a student who runs the
+    notebook again sees the image they saw before rather than one that
+    has shimmered. The colours do not share their noise.
+    """
+    first = ColorImageMaker(str(combined_dir))
+    second = ColorImageMaker(str(combined_dir))
+
+    for color in COLORS:
+        np.testing.assert_array_equal(first.data_sm[color], second.data_sm[color])
+    assert not np.array_equal(first.noise_sm["red"], first.noise_sm["green"])
 
 
 def test_read_frame_gives_the_image_and_its_header(combined_dir):

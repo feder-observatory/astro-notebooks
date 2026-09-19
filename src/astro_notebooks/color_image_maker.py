@@ -118,10 +118,11 @@ def block_mean(image):
     """
     Average a whole image over blocks, a band of rows at a time.
 
-    This is the reduced image the viewers on the first tab are given. It
-    is the same answer `astropy.nddata.block_reduce` gives for a frame
-    that divides evenly, without making anything the size of the frame
-    along the way.
+    This is the reduced image the background is fitted to, and what the
+    viewers on the first tab show once the noise has been put back (see
+    `pixel_noise`). It is the same answer `astropy.nddata.block_reduce`
+    gives for a frame that divides evenly, without making anything the
+    size of the frame along the way.
 
     Parameters
     ----------
@@ -140,6 +141,45 @@ def block_mean(image):
             image[start:stop]
         )
     return out
+
+
+def pixel_noise(image):
+    """
+    Typical scatter of the pixels of a frame about the mean of their block.
+
+    Averaging over blocks takes most of the noise out of an image, so the
+    cuts and the stretch do something different to the reduced image than
+    they do to the frame: a sky that sits on the black point is black in
+    the one and a grey glow in the other. Noise of this size, added to
+    the reduced image, makes it respond to the cuts the way the frame
+    does.
+
+    Parameters
+    ----------
+    image : `numpy.ndarray`
+        The full size frame.
+
+    Returns
+    -------
+    float
+        The median, over the whole blocks of the frame, of the standard
+        deviation of the pixels within a block. The median keeps the
+        stars out of it: inside a block with a star in it the scatter is
+        the shape of the star rather than noise. Blocks with missing
+        pixels are left out, and the answer is 0 if no block is left.
+    """
+    scatter = []
+    for start, stop in iter_bands(image.shape[0]):
+        band = image[start:stop]
+        rows, cols = (n - n % REDUCE for n in band.shape)
+        blocks = band[:rows, :cols].reshape(rows // REDUCE, REDUCE,
+                                            cols // REDUCE, REDUCE)
+        # In double precision, or the scatter of a bright sky is lost in
+        # the rounding of its mean.
+        scatter.append(blocks.std(axis=(1, 3), ddof=1, dtype=np.float64).ravel())
+    scatter = np.concatenate(scatter)
+    scatter = scatter[np.isfinite(scatter)]
+    return float(np.median(scatter)) if scatter.size else 0.0
 
 
 def read_frame(path):
@@ -414,6 +454,9 @@ class ColorImageMaker:
         self.data_sm_raw = {}
         self.data_sm = {}
         self.bkgd_sm = {}
+        # Noise the size of the frame's own, which the viewers' reduced
+        # images are shown with; averaging took the real noise out.
+        self.noise_sm = {}
         # One plane of the preview per colour, each of them a pass over a
         # whole frame, so they are kept until something changes them.
         self.preview_planes = {}
@@ -599,6 +642,11 @@ class ColorImageMaker:
         viewer on the first tab. Nothing at full size is worked out here:
         the preview is made the first time it is drawn, and the image
         that gets saved when the Save tab is opened.
+
+        The viewers show the averaged image with made-up noise as big as
+        the frame's own added to it. Without it a viewer shows a sky much
+        darker than the same cuts give in the preview and in the file,
+        where they are applied to pixels that still have their noise.
         """
         for color, filter_name in zip(self._colors, self._filters):
             path = os.path.join(
@@ -610,8 +658,14 @@ class ColorImageMaker:
 
         blank_missing_pixels([self.data[c] for c in self._colors])
 
-        for color in self._colors:
+        for seed, color in enumerate(self._colors):
             self.data_sm_raw[color] = block_mean(self.data[color])
+            # Seeded, so that loading the same images again shows the
+            # same thing, and differently for each colour.
+            rng = np.random.default_rng(seed)
+            self.noise_sm[color] = pixel_noise(self.data[color]) * rng.standard_normal(
+                self.data_sm_raw[color].shape, dtype=np.float32
+            )
 
         if self.subtract_bkgd_checkbox.value:
             self._compute_backgrounds()
@@ -657,12 +711,13 @@ class ColorImageMaker:
             band at a time, wherever they are used.
         """
         for color in self._colors:
+            # A new array, so that nothing a viewer does to the image it
+            # is given can reach the one the background is fitted to,
+            # which has no noise added to it.
+            shown = self.data_sm_raw[color] + self.noise_sm[color]
             if subtract:
-                self.data_sm[color] = self.data_sm_raw[color] - self.bkgd_sm[color]
-            else:
-                # A copy, so that nothing a viewer does to the image it is
-                # given can reach the one the background is fitted to.
-                self.data_sm[color] = self.data_sm_raw[color].copy()
+                shown -= self.bkgd_sm[color]
+            self.data_sm[color] = shown
 
     # ------------------------------------------------------------------
     # Image scaling and rendering
