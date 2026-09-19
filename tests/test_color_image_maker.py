@@ -227,6 +227,27 @@ def test_save_writes_the_images_loaded_now(maker, tmp_path, monkeypatch):
     np.testing.assert_array_equal(saved, maker._full_res_rgb())
 
 
+def test_setting_image_directory_redraws_what_is_on_screen(maker, tmp_path):
+    """Loading another directory replaces the images already being shown.
+
+    Loading draws nothing, because a new widget has nothing on screen yet.
+    After a reload, though, the preview and, if its tab is open, the
+    picture on the save tab were still of the object loaded before, even
+    though saving wrote the new one.
+    """
+    maker.widget.selected_index = 2
+    shown = maker.widget.children[2].children[3]
+    png_before = shown.value
+    red_before = maker._preview_plane("red").copy()
+    other_dir = _write_combined_images(tmp_path / "other", "ngc 7331", seed=7)
+
+    maker.image_directory = str(other_dir)
+
+    assert shown.value != png_before
+    assert set(maker.preview_planes) == set(COLORS)
+    assert not np.allclose(red_before, maker.preview_planes["red"])
+
+
 def test_setting_image_directory_reloads(maker, tmp_path):
     """Assigning ``image_directory`` loads the images from the new directory.
 

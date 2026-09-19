@@ -432,6 +432,11 @@ class ColorImageMaker:
         if hasattr(self, 'image_widgets'):
             self.bkgd_sm = {}
             self._load_data()
+            # Loading draws nothing, which is right for a new widget, but
+            # here the old object may already be on screen.
+            self._update_preview()
+            if self.widget.selected_index == 2:
+                self._refresh_save()
 
     # ------------------------------------------------------------------
     # Widget construction
