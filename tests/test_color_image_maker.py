@@ -555,6 +555,37 @@ def test_scaled_band_is_the_clipped_weighted_stretch(cuts_and_weights):
     np.testing.assert_allclose(scaled, expected, rtol=1e-12)
 
 
+def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
+    """Scaling a band never writes into the frame it came from.
+
+    The cuts are put back into the array that subtracting the background
+    makes, which saves a copy of every band, and that array belongs to
+    this function. With no background to take off, though, the band is a
+    view of the caller's frame, and the frame has to come out of the pass
+    exactly as it went in.
+    """
+    intervals, weights = cuts_and_weights
+    frame = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
+    background = np.linspace(0.0, 20.0, 64, dtype=np.float32).reshape(8, 8)
+    before = frame.copy()
+
+    scaled_band(frame, intervals["green"], LogStretch(), weights["green"])
+
+    np.testing.assert_array_equal(frame, before)
+
+    scaled = scaled_band(frame, intervals["green"], LogStretch(),
+                         weights["green"], background=background)
+
+    np.testing.assert_array_equal(frame, before)
+    # Taking the background off first gives an array of its own, which is
+    # the copy the in-place path is meant to be identical to.
+    np.testing.assert_array_equal(
+        scaled,
+        scaled_band(frame - background, intervals["green"], LogStretch(),
+                    weights["green"]),
+    )
+
+
 def test_background_band_repeats_each_reduced_value_over_its_block():
     """A background fitted to the reduced image scales back up by repeat.
 

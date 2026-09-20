@@ -253,7 +253,8 @@ def background_band(background_sm, start, stop, n_cols):
 
     Each value of a background fitted to the reduced image describes one
     block of `REDUCE` by `REDUCE` pixels of the frame, so scaling it back
-    up is a plain repeat.
+    up is a plain repeat. It is one per band per colour, since the fit is
+    a different one for each colour.
 
     Parameters
     ----------
@@ -305,8 +306,14 @@ def scaled_band(band, interval, stretch, weight, background=None):
         data come out as 0, which is black.
     """
     if background is not None:
+        # Taking the background off makes an array of this band alone, and
+        # it is ours, so the cuts can go back into it.
         band = band - background
-    values = interval(band)      # a floating point copy of this band alone
+        values = interval(band, out=band)
+    else:
+        # Here band is a view of the caller's frame, which has to be left
+        # as it is, so the cuts go into a floating point copy of the band.
+        values = interval(band)
     values = stretch(values, out=values, clip=False)
     values *= 2 * weight
     np.clip(values, 0, 1, out=values)
