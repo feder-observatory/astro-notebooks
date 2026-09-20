@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -231,12 +233,13 @@ def test_thumb_cache_lives_in_data_dir(fits_dir, tmp_path):
     assert {p.name for p in tmp_path.iterdir()} == {"data"}
 
 
-def test_default_worker_cap_is_four(fits_dir, mocker):
-    """By default the thumbnail thread pool has four workers.
+def test_default_worker_cap_is_two(fits_dir, mocker):
+    """By default the thumbnail thread pool has two workers.
 
     The cap, rather than one thread per CPU, is what keeps peak memory
-    down on a JupyterHub with a per-user limit, so a change to the
-    default should be deliberate.
+    down on a JupyterHub with a per-user limit, and two rather than four
+    is what fits a hub giving each user about a gigabyte and about one
+    core, so a change to the default should be deliberate.
     """
     spy = mocker.patch(
         "astro_notebooks.image_selector.ThreadPoolExecutor",
@@ -244,18 +247,23 @@ def test_default_worker_cap_is_four(fits_dir, mocker):
     )
     ImageSelect(directory=fits_dir)
     assert spy.call_count == 1
-    assert spy.call_args.kwargs["max_workers"] == 4
+    assert spy.call_args.kwargs["max_workers"] == 2
+    assert ImageSelect.DEFAULT_MAX_WORKERS == 2
 
 
 def test_max_workers_kwarg_flows_through(fits_dir, mocker):
-    """``ImageSelect(max_workers=...)`` sets the thread pool size."""
+    """``ImageSelect(max_workers=...)`` sets the thread pool size.
+
+    Asks for three, which is not the default, so that the default being
+    passed through would fail this too.
+    """
     spy = mocker.patch(
         "astro_notebooks.image_selector.ThreadPoolExecutor",
         side_effect=ThreadPoolExecutor,
     )
-    ImageSelect(directory=fits_dir, max_workers=2)
+    ImageSelect(directory=fits_dir, max_workers=3)
     assert spy.call_count == 1
-    assert spy.call_args.kwargs["max_workers"] == 2
+    assert spy.call_args.kwargs["max_workers"] == 3
 
 
 def test_thumbnail_data_matches_whole_frame(tmp_path):
@@ -744,6 +752,68 @@ def test_showing_another_frame_replaces_the_first(star_fits_dir,
         assert len(call.args) == 1
 
 
+def _shown_tiles(image_select):
+    """Names of the tiles that are marked as being in the viewer."""
+    return [tile._fname for tile in image_select._selectors if tile.shown]
+
+
+def test_no_tile_is_marked_before_a_frame_is_shown(star_fits_dir,
+                                                   viewer_factory):
+    """Nothing is in the viewer until a thumbnail is clicked, so no tile is
+    marked as shown and every tile has the ordinary border.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    assert _shown_tiles(w) == []
+    for tile in w._selectors:
+        assert tile.layout.border_top == ImageWithSelector.TILE_BORDER
+
+
+def test_tile_of_the_frame_in_the_viewer_is_marked(star_fits_dir,
+                                                   viewer_factory):
+    """The tile of the frame in the viewer, and no other, has the heavier
+    border, and the mark moves when another frame is shown.
+
+    The marked tile must take up the same room as the others, or every
+    tile after it would move when a thumbnail is clicked, so its border
+    and padding together are as wide as an ordinary tile's.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w._show_frame(2)
+    assert _shown_tiles(w) == ["stars-002.fit"]
+    shown = w._selectors[2]
+    for side in ('top', 'bottom', 'left', 'right'):
+        assert (getattr(shown.layout, f'border_{side}') ==
+                ImageWithSelector.SHOWN_TILE_BORDER)
+    assert shown.layout.padding == ImageWithSelector.SHOWN_TILE_PADDING
+
+    w.show_frame("stars-004.fit")
+    assert _shown_tiles(w) == ["stars-004.fit"]
+    assert w._selectors[2].layout.border_top == ImageWithSelector.TILE_BORDER
+    assert w._selectors[2].layout.padding == ImageWithSelector.TILE_PADDING
+
+    def width(css):
+        return int(css.split('px')[0])
+
+    assert (width(ImageWithSelector.SHOWN_TILE_BORDER) +
+            width(ImageWithSelector.SHOWN_TILE_PADDING) ==
+            width(ImageWithSelector.TILE_BORDER) +
+            width(ImageWithSelector.TILE_PADDING))
+
+
+def test_tile_is_not_marked_when_the_frame_cannot_be_shown(star_fits_dir,
+                                                           viewer_factory,
+                                                           mock_viewer):
+    """If loading a frame fails, the mark stays on the frame that is still
+    in the viewer rather than moving to the one that could not be shown.
+    """
+    w = ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
+    w.show_frame("stars-001.fit")
+    mock_viewer.load_image.side_effect = OSError("cannot read the file")
+    with pytest.raises(OSError):
+        w.show_frame("stars-003.fit")
+    assert _shown_tiles(w) == ["stars-001.fit"]
+
+
 def test_details_show_star_cutouts(star_fits_dir, viewer_factory):
     """The details panel shows a close-up of every star measured on the frame.
 
@@ -844,3 +914,20 @@ def test_progress_covers_thumbnails_and_metrics(star_fits_dir, viewer_factory,
     displayed.clear()
     ImageSelect(directory=star_fits_dir, viewer_factory=viewer_factory)
     assert displayed == []
+
+
+def test_importing_the_selector_does_not_import_stellarphot():
+    """Opening the selector must not drag the whole of stellarphot in.
+
+    stellarphot pulls in pandas, scikit-learn, astroquery and more, about
+    180 MB and a couple of seconds, which is far too much to spend on a
+    shared JupyterHub with a per-user memory cap. A fresh interpreter is
+    used so that a module imported by another test cannot hide a
+    regression here.
+    """
+    code = ("import sys, astro_notebooks.image_selector; "
+            "print(any(m == 'stellarphot' or m.startswith('stellarphot.') "
+            "for m in sys.modules))")
+    result = subprocess.run([sys.executable, "-c", code],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "False"

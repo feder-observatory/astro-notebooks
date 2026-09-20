@@ -33,16 +33,28 @@ from .image_quality import (
     summarize_metrics,
 )
 
-try:
-    from stellarphot.gui.custom_widgets import Spinner
-except Exception:
-    # stellarphot's GUI extras may be missing or incompatible; fall back to
-    # a message-only stand-in with the same start/stop interface.
-    Spinner = None
+class _Spinner(ipw.VBox):
+    """
+    Message shown while the images are being prepared.
 
+    Parameters
+    ----------
+    *args
+        Passed on to `ipywidgets.VBox`.
+    message : str, optional
+        Text shown while the spinner is running.
+    **kwargs
+        Passed on to `ipywidgets.VBox`.
 
-class _MessageSpinner(ipw.VBox):
-    """Fallback for stellarphot's Spinner when it cannot be imported."""
+    Notes
+    -----
+    Hidden until `start` is called and hidden again by `stop`, so that it
+    is on screen only while there is work going on.
+
+    stellarphot has the same widget with an animated star beside the
+    message, but importing it pulls in the whole of stellarphot, which is
+    far too much for a per-user memory cap on a shared JupyterHub.
+    """
 
     def __init__(self, *args, message="", **kwargs):
         super().__init__(*args, **kwargs)
@@ -51,9 +63,11 @@ class _MessageSpinner(ipw.VBox):
         self.layout.display = "none"
 
     def start(self):
+        """Show the message."""
         self.layout.display = "flex"
 
     def stop(self):
+        """Hide the message."""
         self.layout.display = "none"
 
 
@@ -473,6 +487,11 @@ class ImageWithSelector(ipw.VBox):
     TILE_BORDER = '1px solid #9e9e9e'
     TILE_PADDING = '6px'
     TILE_MARGIN = '4px'
+    # The tile whose frame is in the viewer gets a heavier, coloured border.
+    # Its padding is smaller by the extra width of the border so that the
+    # tile stays the same size and the tiles after it do not move.
+    SHOWN_TILE_BORDER = '4px solid #1976d2'
+    SHOWN_TILE_PADDING = '3px'
 
     def __init__(self, image_png, *args, width="200px", fname="", **kwargs):
         super().__init__(*args, **kwargs)
@@ -516,11 +535,25 @@ class ImageWithSelector(ipw.VBox):
                                         self._star_cutout, self.select_box])
         self.children = [self.image_display, self.mobox]
         self.layout.width = width
-        # Box each tile in so that it is obvious which checkbox goes with
-        # which thumbnail.
-        self.layout.border = self.TILE_BORDER
-        self.layout.padding = self.TILE_PADDING
         self.layout.margin = self.TILE_MARGIN
+        # Box each tile in so that it is obvious which checkbox goes with
+        # which thumbnail. Setting ``shown`` draws the border.
+        self.shown = False
+
+    @property
+    def shown(self):
+        """bool : Whether this tile is marked as the frame in the viewer."""
+        return self._shown
+
+    @shown.setter
+    def shown(self, value):
+        self._shown = bool(value)
+        if self._shown:
+            self.layout.border = self.SHOWN_TILE_BORDER
+            self.layout.padding = self.SHOWN_TILE_PADDING
+        else:
+            self.layout.border = self.TILE_BORDER
+            self.layout.padding = self.TILE_PADDING
 
     def set_metrics(self, metrics, cutout_png=None):
         """Show this frame's star measurements on the tile.
@@ -565,17 +598,21 @@ class ImageSelect(ipw.VBox):
     downsample : int, optional
         Factor by which each image axis is reduced to make a thumbnail.
     max_workers : int, optional
-        Number of threads used to make thumbnails. The default, 4, is both
-        faster and roughly half the peak memory of one thread per CPU,
-        which matters on a JupyterHub with a per-user memory cap.
+        Number of threads used to make thumbnails and measure stars. The
+        default, 2, keeps peak memory down on a shared JupyterHub, where
+        each user has about a gigabyte and about one core; see
+        :attr:`DEFAULT_MAX_WORKERS`.
     **kwargs
         Passed on to `ipywidgets.VBox`.
     """
 
-    # A small pool is both faster and roughly half the peak memory of the
-    # default (one thread per CPU) pool, which matters on a JupyterHub with
-    # a per-user memory cap.
-    DEFAULT_MAX_WORKERS = 4
+    # Every thumbnail thread holds a band of a frame, so peak memory goes
+    # up with the size of the pool (about 60 MB a thread on 4096x4096
+    # frames) while the time saved quickly stops doing so. A second thread
+    # still earns its keep by overlapping the FITS reads with the work on
+    # the band already read; more than that buys little on a hub where
+    # each user has about one core.
+    DEFAULT_MAX_WORKERS = 2
 
     # How tall the scrolling panel of thumbnails is, and how wide the
     # tiles and the panel that holds them are.
@@ -960,8 +997,7 @@ class ImageSelect(ipw.VBox):
 
     def _run_jobs(self, thumbnail_todo, measure_todo, thumb_dir):
         """Run the thumbnail and measurement jobs behind a progress bar."""
-        spinner_cls = Spinner if Spinner is not None else _MessageSpinner
-        spinner = spinner_cls(message="Preparing images...")
+        spinner = _Spinner(message="Preparing images...")
         progress = ipw.IntProgress(
             value=0, min=0,
             max=len(thumbnail_todo) + len(measure_todo),
@@ -1174,6 +1210,11 @@ class ImageSelect(ipw.VBox):
             # file name, but they can be read with a unit supplied.
             self.viewer.load_image(CCDData.read(path, unit='adu'))
         self.details.children = self._details(index)
+        # Mark the tile of the frame that is now in the viewer, and only
+        # that one, so that it is obvious which thumbnail is being shown.
+        for tile_index, tile in enumerate(self._selectors):
+            if tile.shown != (tile_index == index):
+                tile.shown = tile_index == index
 
     def _details(self, index):
         """Widgets describing one frame for the panel under the viewer."""
