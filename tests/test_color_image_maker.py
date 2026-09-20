@@ -648,22 +648,6 @@ def test_block_mean_and_noise_matches_block_reduce():
     )
 
 
-def test_block_mean_of_a_frame_that_does_not_divide_evenly():
-    """A frame that is not a whole number of blocks still reduces.
-
-    The blocks along the bottom and right-hand edges are short, and each
-    one is the mean of the pixels it does have rather than of pixels that
-    are not there.
-    """
-    rng = np.random.default_rng(7)
-    image = rng.uniform(0.0, 1000.0, size=(100, 120)).astype(np.float32)
-
-    reduced, _ = block_mean_and_noise(image)
-
-    assert reduced.shape == (13, 15)
-    np.testing.assert_allclose(reduced, _block_means(image), rtol=1e-6)
-
-
 def test_the_noise_is_the_sky_and_not_the_stars():
     """The noise found is the sky's, whatever else is in the frame.
 

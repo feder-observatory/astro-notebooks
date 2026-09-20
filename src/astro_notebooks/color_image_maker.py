@@ -681,8 +681,7 @@ class ColorImageMaker:
         # pass over a frame to draw something nobody is looking at.
         self._preview_stale = True
         # The same for the picture on the Save tab, which is another pass
-        # over all three frames. Coming back to that tab with nothing
-        # changed used to make the picture again.
+        # over all three frames.
         self._save_stale = True
 
         self._build_widgets()
@@ -866,10 +865,8 @@ class ColorImageMaker:
         the preview is made the first time it is drawn, and the image
         that gets saved when the Save tab is opened.
 
-        The viewers show the averaged image with made-up noise as big as
-        the frame's own added to it. Without it a viewer shows a sky much
-        darker than the same cuts give in the preview and in the file,
-        where they are applied to pixels that still have their noise.
+        The images the viewers are given have noise of their own added,
+        for the reason the comment where it is added gives.
         """
         # Let go of the frames of any images loaded before. Each new frame
         # would otherwise be read while all three old ones were still
@@ -906,12 +903,6 @@ class ColorImageMaker:
             self._compute_backgrounds()
         self._apply_background(self.subtract_bkgd_checkbox.value)
 
-        for color in self._colors:
-            self.image_widgets[color].load_image(self.data_sm[color])
-            self.image_widgets[color].set_stretch(
-                self._stretches[self.stretch_chooser.value]
-            )
-
         # Give the viewers the cuts the level sliders are set to. The
         # preview planes are made the first time the preview is drawn.
         for color in self._colors:
@@ -936,7 +927,11 @@ class ColorImageMaker:
 
     def _apply_background(self, subtract):
         """
-        Set the reduced images the viewers show on the first tab.
+        Make the reduced images the viewers show and load them.
+
+        Each viewer is given the stretch the chooser is set to along
+        with its image, so that a reload cannot leave it showing
+        something other than what was chosen.
 
         Parameters
         ----------
@@ -953,6 +948,10 @@ class ColorImageMaker:
             if subtract:
                 shown -= self.bkgd_sm[color]
             self.data_sm[color] = shown
+            self.image_widgets[color].load_image(shown)
+            self.image_widgets[color].set_stretch(
+                self._stretches[self.stretch_chooser.value]
+            )
 
     # ------------------------------------------------------------------
     # Image scaling and rendering
@@ -1144,11 +1143,6 @@ class ColorImageMaker:
         if change['new'] and not self.bkgd_sm:
             self._compute_backgrounds()
         self._apply_background(change['new'])
-        for color in self._colors:
-            self.image_widgets[color].load_image(self.data_sm[color])
-            self.image_widgets[color].set_stretch(
-                self._stretches[self.stretch_chooser.value]
-            )
         self._settings_changed(*self._colors)
 
     # ------------------------------------------------------------------
