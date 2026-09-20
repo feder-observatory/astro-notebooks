@@ -555,9 +555,65 @@ def _band_bytes(image, start, stop, **scaling):
     return scaled.astype(np.uint8)
 
 
+def _rgb_band(frames, scalings, start, stop):
+    """
+    Turn rows of all three frames into the bytes of a band of the image.
+
+    Parameters
+    ----------
+    frames : dict
+        The full size frame of each colour in `COLORS`.
+    scalings : dict
+        How each colour is to be scaled, as for `rgb_uint8`.
+    start, stop : int
+        First row wanted and the row after the last.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        Those rows of the image, ``(stop - start, columns, 3)`` of uint8.
+    """
+    out = np.empty((stop - start, frames[COLORS[0]].shape[1], 3), dtype=np.uint8)
+    for plane, color in enumerate(COLORS):
+        out[:, :, plane] = _band_bytes(frames[color], start, stop,
+                                       **scalings[color])
+    return out
+
+
+def save_rgb_image(frames, scalings, path):
+    """
+    Write the finished image to a file, a band of rows at a time.
+
+    Each band is pasted into the file's image as it is made, so neither
+    the whole image nor a copy of it in Pillow is ever in memory: at 4096
+    by 4096 that is a 48 MB array and a 64 MB buffer beside the three
+    frames. The bytes written are the same either way.
+
+    Parameters
+    ----------
+    frames : dict
+        The full size frame of each colour in `COLORS`.
+    scalings : dict
+        How each colour is to be scaled, as for `rgb_uint8`.
+    path : str
+        Where to write the image. Pillow takes the format from the
+        extension, as it does for an image built in one piece.
+    """
+    shape = frames[COLORS[0]].shape
+    image = Image.new('RGB', (shape[1], shape[0]))
+    for start, stop, _ in iter_bands(shape[0]):
+        image.paste(Image.fromarray(_rgb_band(frames, scalings, start, stop)),
+                    (0, start))
+    image.save(path)
+
+
 def rgb_uint8(frames, scalings):
     """
     Make the image that gets saved, one byte per colour per pixel.
+
+    This is what the file holds, as an array. Saving does not go this
+    way, since the array is as big as the file; `save_rgb_image` writes
+    the same bytes without ever holding them all.
 
     Parameters
     ----------
@@ -576,9 +632,7 @@ def rgb_uint8(frames, scalings):
     shape = frames[COLORS[0]].shape
     out = np.empty(shape + (3,), dtype=np.uint8)
     for start, stop, _ in iter_bands(shape[0]):
-        for plane, color in enumerate(COLORS):
-            out[start:stop, :, plane] = _band_bytes(frames[color], start, stop,
-                                                    **scalings[color])
+        out[start:stop] = _rgb_band(frames, scalings, start, stop)
     return out
 
 
@@ -827,11 +881,12 @@ class ColorImageMaker:
                 save_status_label.value = f'{filename} already exists. Click again to overwrite.'
                 return
 
-            # This is the only place the full size image is built. The tab
-            # shows a quarter size picture made band by band, so the 50 MB
-            # of it is here for as long as Pillow takes to write the file
-            # and no longer.
-            Image.fromarray(self._full_res_rgb()).save(filename)
+            # The file is written a band of rows at a time, so saving
+            # costs a band rather than the 50 MB of the whole image and
+            # as much again in Pillow, beside the three frames.
+            save_rgb_image(
+                self.data, {c: self._scaling(c) for c in self._colors}, filename
+            )
             save_status_label.value = f'Saved: {filename}'
             _reset_save_button()
 
@@ -980,21 +1035,6 @@ class ColorImageMaker:
             # never made or a reload failed part way; nothing comes off then.
             background=self.bkgd_sm.get(color) if subtract else None,
         )
-
-    def _full_res_rgb(self):
-        """
-        Build the finished image at full size, ready to be written out.
-
-        Only saving needs this. The Save tab shows `_reduced_rgb`, which
-        is the same image a quarter of the size on a side and is built
-        without this one ever existing.
-
-        Returns
-        -------
-        `numpy.ndarray`
-            The image, ``(rows, columns, 3)`` of uint8.
-        """
-        return rgb_uint8(self.data, {c: self._scaling(c) for c in self._colors})
 
     def _reduced_rgb(self):
         """

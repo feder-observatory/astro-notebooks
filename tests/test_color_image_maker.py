@@ -251,7 +251,7 @@ def test_save_tab_shows_the_image_it_would_save(maker, tmp_path, monkeypatch):
     shown = np.asarray(
         Image.open(io.BytesIO(maker.widget.children[2].children[3].value))
     )
-    saved = maker._full_res_rgb()
+    saved = _full_res_rgb(maker)
     assert shown.shape == (IMAGE_SHAPE[0] // 4, IMAGE_SHAPE[1] // 4, 3)
     for plane in range(3):
         np.testing.assert_allclose(
@@ -294,6 +294,39 @@ def test_opening_the_save_tab_makes_nothing_the_size_of_the_saved_image(big_make
     assert peak < 4 * band_bytes < saved_bytes
 
 
+def test_saving_makes_nothing_the_size_of_the_saved_image(
+    big_maker, tmp_path, monkeypatch
+):
+    """Writing the file does not build the whole image to hand to Pillow.
+
+    Saving used to make the image as one array of bytes, 48 MB at 4096 by
+    4096, which Pillow then copied into a buffer of its own before
+    encoding it: a hundred-odd MB on top of the three frames, at the one
+    moment a student is sure to reach. The file is now pasted together a
+    band of rows at a time, so nothing the size of the image is made.
+    """
+    monkeypatch.chdir(tmp_path)
+    saved_bytes = 3 * big_maker.data["red"].size
+    band_bytes = BAND_ROWS * BIG_IMAGE_SHAPE[1] * np.dtype(np.float32).itemsize
+    filename_input, button_row = big_maker.widget.children[2].children[:2]
+    filename_input.value = "mem"
+
+    tracemalloc.start()
+    try:
+        button_row.children[0].click()
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    # The file was written, and is what was measured.
+    saved = tmp_path / "ngc 7331-mem-color.png"
+    assert saved.exists()
+    assert Image.open(saved).size == (BIG_IMAGE_SHAPE[1], BIG_IMAGE_SHAPE[0])
+    # A few bands' worth, since the cuts and the stretch do not make one
+    # array of a band, and a few bands are a fraction of the image.
+    assert peak < 4 * band_bytes < saved_bytes
+
+
 def test_save_writes_the_images_loaded_now(maker, tmp_path, monkeypatch):
     """Saving writes the object that is loaded, not one loaded earlier.
 
@@ -310,7 +343,7 @@ def test_save_writes_the_images_loaded_now(maker, tmp_path, monkeypatch):
     maker.widget.children[2].children[1].children[0].click()
 
     saved = np.asarray(Image.open(tmp_path / "ngc 7331--color.png"))
-    np.testing.assert_array_equal(saved, maker._full_res_rgb())
+    np.testing.assert_array_equal(saved, _full_res_rgb(maker))
 
 
 def test_setting_image_directory_redraws_what_is_on_screen(maker, tmp_path):
@@ -482,6 +515,16 @@ def test_setting_image_directory_reloads(maker, tmp_path):
 # Tall enough to be split into more than one band, with a last band that
 # is shorter than the rest.
 BANDED_SHAPE = (600, 48)
+
+
+def _full_res_rgb(maker):
+    """The finished image at full size, the bytes the file is written from.
+
+    Saving pastes the image into the file a band of rows at a time and
+    never holds the whole thing, so a test that wants all of it to
+    compare against asks `rgb_uint8` for it here instead.
+    """
+    return rgb_uint8(maker.data, {c: maker._scaling(c) for c in maker._colors})
 
 
 def _block_means(image, factor=REDUCE):
@@ -1127,7 +1170,7 @@ def test_one_background_fit_serves_the_preview_and_the_file(maker):
     np.testing.assert_allclose(
         maker._preview_plane("green"), _block_means(full_size), rtol=1e-6
     )
-    saved = maker._full_res_rgb()
+    saved = _full_res_rgb(maker)
     np.testing.assert_array_equal(saved[:, :, 1], (full_size * 255).astype(np.uint8))
 
 
