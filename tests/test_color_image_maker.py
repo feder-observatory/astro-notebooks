@@ -22,6 +22,7 @@ from astro_notebooks.color_image_maker import (
     BAND_ROWS,
     COLORS,
     REDUCE,
+    SAVE_REDUCE,
     ColorImageMaker,
     blank_missing_pixels,
     block_mean,
@@ -503,12 +504,21 @@ def test_iter_bands_covers_every_row():
     """The bands run in order, do not overlap, and reach the last row.
 
     The last band is short when the frame does not divide evenly, and
-    every band but that one is the full height.
+    every band but that one is the full height. Each band comes with the
+    rows of the reduced image it averages into, which run on from one
+    band to the next and take in the short block at the bottom.
     """
     bands = list(iter_bands(600, band_rows=256))
 
-    assert bands == [(0, 256), (256, 512), (512, 600)]
-    assert list(iter_bands(512, band_rows=256)) == [(0, 256), (256, 512)]
+    assert [(start, stop) for start, stop, _ in bands] == [
+        (0, 256), (256, 512), (512, 600)
+    ]
+    assert [rows for _, _, rows in bands] == [
+        slice(0, 32), slice(32, 64), slice(64, 75)
+    ]
+    assert [rows for _, _, rows in iter_bands(512, factor=SAVE_REDUCE)] == [
+        slice(0, 64), slice(64, 128)
+    ]
 
 
 def test_block_mean_matches_block_reduce():
@@ -584,7 +594,7 @@ def _old_pixel_noise(image):
     the way, and took the median of them all.
     """
     scatter = []
-    for start, stop in iter_bands(image.shape[0]):
+    for start, stop, _ in iter_bands(image.shape[0]):
         band = image[start:stop]
         rows, cols = (n - n % REDUCE for n in band.shape)
         blocks = band[:rows, :cols].reshape(rows // REDUCE, REDUCE,
@@ -881,17 +891,17 @@ def test_reduced_rgb_uint8_is_the_saved_image_averaged(
     scalings = _scalings(intervals, LinearStretch(), weights)
     blank_missing_pixels([ragged_frames[color] for color in COLORS])
 
-    shown = reduced_rgb_uint8(ragged_frames, scalings, factor=4)
+    shown = reduced_rgb_uint8(ragged_frames, scalings)
 
     saved = rgb_uint8(ragged_frames, scalings)
     assert shown.dtype == np.uint8
     assert shown.shape == (
-        -(-BANDED_SHAPE[0] // 4), -(-BANDED_SHAPE[1] // 4), 3
+        -(-BANDED_SHAPE[0] // SAVE_REDUCE), -(-BANDED_SHAPE[1] // SAVE_REDUCE), 3
     )
     for plane in range(3):
         np.testing.assert_allclose(
             shown[:, :, plane],
-            _block_means(saved[:, :, plane], factor=4),
+            _block_means(saved[:, :, plane], factor=SAVE_REDUCE),
             atol=1,
         )
 
@@ -905,11 +915,13 @@ def test_png_bytes_encodes_the_picture_it_is_given(ragged_frames, cuts_and_weigh
     """
     intervals, weights = cuts_and_weights
     scalings = _scalings(intervals, LinearStretch(), weights)
-    png = png_bytes(reduced_rgb_uint8(ragged_frames, scalings, factor=4))
+    png = png_bytes(reduced_rgb_uint8(ragged_frames, scalings))
 
     shown = Image.open(io.BytesIO(png))
     assert shown.format == "PNG"
-    assert shown.size == (-(-BANDED_SHAPE[1] // 4), -(-BANDED_SHAPE[0] // 4))
+    assert shown.size == (
+        -(-BANDED_SHAPE[1] // SAVE_REDUCE), -(-BANDED_SHAPE[0] // SAVE_REDUCE)
+    )
 
 
 def _write_images_with_empty_edges(directory, object_name):

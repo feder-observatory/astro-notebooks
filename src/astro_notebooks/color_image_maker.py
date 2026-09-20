@@ -38,6 +38,11 @@ BAND_ROWS = 256
 #: of the images the viewers on the first tab show.
 REDUCE = 8
 
+#: How many pixels on a side are averaged into one pixel of the picture the
+#: Save tab shows. It divides `BAND_ROWS`, so that every band but the last
+#: is a whole number of blocks.
+SAVE_REDUCE = 4
+
 
 # ----------------------------------------------------------------------
 # Working a band of rows at a time
@@ -51,18 +56,44 @@ REDUCE = 8
 # ----------------------------------------------------------------------
 
 
-def iter_bands(n_rows, band_rows=BAND_ROWS):
+def _n_blocks(n_pixels, factor=REDUCE):
     """
-    Split a frame into bands of rows.
+    How many blocks an axis of `n_pixels` pixels reduces to.
+
+    Parameters
+    ----------
+    n_pixels : int
+        Length of the axis.
+    factor : int, optional
+        How many pixels on a side go into one block.
+
+    Returns
+    -------
+    int
+        The number of blocks, counting the short one at the end of an
+        axis that does not divide evenly.
+    """
+    return -(-n_pixels // factor)
+
+
+def iter_bands(n_rows, band_rows=BAND_ROWS, factor=REDUCE):
+    """
+    Split a frame into bands of rows, with the blocks each band fills.
+
+    Everything that walks a frame walks it this way, and everything that
+    reduces one as it goes writes into the rows given here, so the band
+    and block arithmetic is written once rather than in each of them.
 
     Parameters
     ----------
     n_rows : int
         Number of rows in the frame.
     band_rows : int, optional
-        Number of rows in a band. A multiple of `REDUCE`, so that the
+        Number of rows in a band. A multiple of `factor`, so that the
         bands fall on the boundaries of the blocks the preview averages
         over.
+    factor : int, optional
+        How many pixels on a side go into one block of a reduced image.
 
     Yields
     ------
@@ -70,9 +101,13 @@ def iter_bands(n_rows, band_rows=BAND_ROWS):
         First row of the band and the row after its last, in order and
         covering every row of the frame. The last band is shorter than
         the rest if the frame does not divide evenly.
+    rows : slice
+        The rows of the reduced image the band averages into, which a
+        caller that reduces nothing ignores.
     """
     for start in range(0, n_rows, band_rows):
-        yield start, min(start + band_rows, n_rows)
+        stop = min(start + band_rows, n_rows)
+        yield start, stop, slice(start // factor, _n_blocks(stop, factor))
 
 
 def _block_counts(n_pixels, factor=REDUCE):
@@ -92,7 +127,7 @@ def _block_counts(n_pixels, factor=REDUCE):
         One count per block, all `factor` except the last, which is
         short if the axis does not divide evenly.
     """
-    counts = np.full(-(-n_pixels // factor), float(factor))
+    counts = np.full(_n_blocks(n_pixels, factor), float(factor))
     counts[-1] = n_pixels - factor * (len(counts) - 1)
     return counts
 
@@ -180,12 +215,10 @@ def block_mean(image):
     `numpy.ndarray`
         The reduced image, as float32.
     """
-    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
+    out = np.empty((_n_blocks(image.shape[0]), _n_blocks(image.shape[1])),
                    dtype=np.float32)
-    for start, stop in iter_bands(image.shape[0]):
-        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(
-            image[start:stop]
-        )
+    for start, stop, rows in iter_bands(image.shape[0]):
+        out[rows] = block_mean_band(image[start:stop])
     return out
 
 
@@ -274,7 +307,7 @@ def block_mean_and_noise(image):
         The typical scatter of the pixels of the frame about the mean of
         their block, as `pixel_noise` describes it.
     """
-    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
+    out = np.empty((_n_blocks(image.shape[0]), _n_blocks(image.shape[1])),
                    dtype=np.float32)
     # One scatter per whole block of the frame, kept in an array of its
     # own rather than gathered up band by band afterwards: the bands
@@ -282,13 +315,13 @@ def block_mean_and_noise(image):
     # whole number of blocks deep.
     scatter = np.empty((image.shape[0] // REDUCE, image.shape[1] // REDUCE),
                        dtype=np.float32)
-    for start, stop in iter_bands(image.shape[0]):
+    for start, stop, rows in iter_bands(image.shape[0]):
         band = image[start:stop]
-        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(band)
-        first_block = start // REDUCE
-        scatter[first_block:first_block + (stop - start) // REDUCE] = (
-            _band_scatter(band)
-        )
+        out[rows] = block_mean_band(band)
+        # The whole blocks of the band, which are the rows it fills apart
+        # from a short last one, since a short block has no scatter.
+        whole = slice(rows.start, rows.start + (stop - start) // REDUCE)
+        scatter[whole] = _band_scatter(band)
     scatter = scatter[np.isfinite(scatter)]
     if not scatter.size:
         return out, 0.0
@@ -323,7 +356,7 @@ def read_frame(path):
     with fits.open(path, memmap=True) as hdu_list:
         hdu = _image_hdu(hdu_list)
         frame = np.empty(hdu.shape, dtype=np.float32)
-        for start, stop in iter_bands(hdu.shape[0]):
+        for start, stop, _ in iter_bands(hdu.shape[0]):
             frame[start:stop] = hdu.section[start:stop]
         return frame, hdu.header
 
@@ -344,7 +377,7 @@ def blank_missing_pixels(frames):
     frames : list of `numpy.ndarray`
         Frames of the same shape. They are modified in place.
     """
-    for start, stop in iter_bands(frames[0].shape[0]):
+    for start, stop, _ in iter_bands(frames[0].shape[0]):
         missing = np.isnan(frames[0][start:stop])
         for frame in frames[1:]:
             missing |= np.isnan(frame[start:stop])
@@ -381,7 +414,7 @@ def subtract_background_band(band, background_sm, start=0):
         The band with its background taken off, as float32.
     """
     rows, cols = band.shape
-    background = background_sm[start // REDUCE:-(-(start + rows) // REDUCE)]
+    background = background_sm[start // REDUCE:_n_blocks(start + rows)]
     out = np.empty((rows, cols), dtype=np.float32)
     blocks = _whole_blocks(band)
     n_row_blocks, n_col_blocks = blocks.shape[0], blocks.shape[2]
@@ -456,31 +489,6 @@ def scaled_band(band, interval, stretch, weight, background=None, start=0):
     return values
 
 
-def _scaled_rows(image, start, stop, interval, stretch, weight,
-                 background=None):
-    """
-    Turn rows of one full size frame into the values that get displayed.
-
-    Parameters
-    ----------
-    image : `numpy.ndarray`
-        The full size frame of one colour.
-    start, stop : int
-        First row wanted and the row after the last.
-    interval, stretch, weight
-        As for `scaled_band`.
-    background : `numpy.ndarray`, optional
-        Background of the reduced image, to subtract from the frame.
-
-    Returns
-    -------
-    `numpy.ndarray`
-        Values from 0 to 1, one per pixel of those rows.
-    """
-    return scaled_band(image[start:stop], interval, stretch, weight,
-                       background=background, start=start)
-
-
 def preview_plane(image, interval, stretch, weight, background=None):
     """
     Make one colour plane of the preview from a full size frame.
@@ -496,26 +504,21 @@ def preview_plane(image, interval, stretch, weight, background=None):
     ----------
     image : `numpy.ndarray`
         The full size frame of one colour.
-    interval : `astropy.visualization.BaseInterval`
-        The black and white points for this colour.
-    stretch : `astropy.visualization.BaseStretch`
-        The stretch applied between them.
-    weight : float
-        Where this colour's slider in the mixer sits, 0 to 1.
-    background : `numpy.ndarray`, optional
-        Background of the reduced image, to subtract from the frame.
+    interval, stretch, weight, background
+        As for `scaled_band`, applied to every pixel of the frame.
 
     Returns
     -------
     `numpy.ndarray`
         The plane, `REDUCE` times smaller than the frame, as float32.
     """
-    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
+    out = np.empty((_n_blocks(image.shape[0]), _n_blocks(image.shape[1])),
                    dtype=np.float32)
-    for start, stop in iter_bands(image.shape[0]):
-        scaled = _scaled_rows(image, start, stop, interval, stretch, weight,
-                              background)
-        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(scaled)
+    for start, stop, rows in iter_bands(image.shape[0]):
+        out[rows] = block_mean_band(
+            scaled_band(image[start:stop], interval, stretch, weight,
+                        background=background, start=start)
+        )
     return out
 
 
@@ -545,7 +548,7 @@ def _band_bytes(image, start, stop, **scaling):
         floating point image the notebook used to hand it, so that the
         file that is saved is unchanged.
     """
-    scaled = _scaled_rows(image, start, stop, **scaling)
+    scaled = scaled_band(image[start:stop], start=start, **scaling)
     # scaled is this band's own array, so the bytes can be made of it in
     # place rather than of a copy.
     scaled *= 255
@@ -572,16 +575,16 @@ def rgb_uint8(frames, scalings):
     """
     shape = frames[COLORS[0]].shape
     out = np.empty(shape + (3,), dtype=np.uint8)
-    for start, stop in iter_bands(shape[0]):
+    for start, stop, _ in iter_bands(shape[0]):
         for plane, color in enumerate(COLORS):
             out[start:stop, :, plane] = _band_bytes(frames[color], start, stop,
                                                     **scalings[color])
     return out
 
 
-def reduced_rgb_uint8(frames, scalings, factor=4):
+def reduced_rgb_uint8(frames, scalings):
     """
-    Make the image that gets saved, `factor` times smaller.
+    Make the image that gets saved, `SAVE_REDUCE` times smaller.
 
     This is the picture the Save tab shows. Each band is scaled to the
     bytes that would be written and averaged over blocks as it is made,
@@ -596,10 +599,6 @@ def reduced_rgb_uint8(frames, scalings, factor=4):
         The full size frame of each colour in `COLORS`.
     scalings : dict
         How each colour is to be scaled, as for `rgb_uint8`.
-    factor : int, optional
-        How many pixels on a side go into one pixel of the picture. It
-        divides `BAND_ROWS`, so that every band but the last is a whole
-        number of blocks.
 
     Returns
     -------
@@ -608,14 +607,12 @@ def reduced_rgb_uint8(frames, scalings, factor=4):
         rounded mean of the block of the saved image it stands for.
     """
     shape = frames[COLORS[0]].shape
-    out = np.empty((-(-shape[0] // factor), -(-shape[1] // factor), 3),
-                   dtype=np.uint8)
-    for start, stop in iter_bands(shape[0]):
+    out = np.empty((_n_blocks(shape[0], SAVE_REDUCE),
+                    _n_blocks(shape[1], SAVE_REDUCE), 3), dtype=np.uint8)
+    for start, stop, rows in iter_bands(shape[0], factor=SAVE_REDUCE):
         for plane, color in enumerate(COLORS):
             band = _band_bytes(frames[color], start, stop, **scalings[color])
-            out[start // factor:-(-stop // factor), :, plane] = np.round(
-                block_mean_band(band, factor)
-            )
+            out[rows, :, plane] = np.round(block_mean_band(band, SAVE_REDUCE))
     return out
 
 
