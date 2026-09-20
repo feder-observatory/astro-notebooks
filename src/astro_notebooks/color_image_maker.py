@@ -97,6 +97,36 @@ def _block_counts(n_pixels, factor=REDUCE):
     return counts
 
 
+def _whole_blocks(array, factor=REDUCE):
+    """
+    See an array as the blocks of `factor` by `factor` pixels it holds.
+
+    Parameters
+    ----------
+    array : `numpy.ndarray`
+        Any two dimensional array. Rows and columns past the last whole
+        block are left out, so an axis whose length is not a multiple of
+        `factor` loses its short block.
+    factor : int, optional
+        How many pixels on a side go into one block.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        A ``(row blocks, factor, column blocks, factor)`` view of the
+        array. Reshaping the whole blocks of an array whose columns do
+        not divide evenly copies them instead, which costs a second
+        array and leaves anything written into it nowhere.
+    """
+    row_blocks, col_blocks = (n // factor for n in array.shape)
+    row_stride, col_stride = array.strides
+    return np.lib.stride_tricks.as_strided(
+        array,
+        shape=(row_blocks, factor, col_blocks, factor),
+        strides=(factor * row_stride, row_stride, factor * col_stride, col_stride),
+    )
+
+
 def block_mean_band(band, factor=REDUCE):
     """
     Average one band of rows over blocks of `factor` by `factor` pixels.
@@ -168,7 +198,8 @@ def pixel_noise(image):
     they do to the frame: a sky that sits on the black point is black in
     the one and a grey glow in the other. Noise of this size, added to
     the reduced image, makes it respond to the cuts the way the frame
-    does.
+    does. It is the noise `block_mean_and_noise` finds, which is where
+    the loading of a frame gets it, alongside the reduced image itself.
 
     Parameters
     ----------
@@ -184,18 +215,86 @@ def pixel_noise(image):
         the shape of the star rather than noise. Blocks with missing
         pixels are left out, and the answer is 0 if no block is left.
     """
-    scatter = []
+    return block_mean_and_noise(image)[1]
+
+
+def _band_scatter(band):
+    """
+    Scatter of the pixels within each whole block of a band of rows.
+
+    Parameters
+    ----------
+    band : `numpy.ndarray`
+        The rows to measure. Blocks that run off the edge of the frame
+        are left out, since a short block is a worse measure of the noise
+        than a whole one and there are only ever a few of them.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        The standard deviation, with one degree of freedom taken by the
+        mean, of the pixels of each whole block. A block with a missing
+        pixel comes out as NaN.
+    """
+    blocks = _whole_blocks(band)
+    n_pixels = REDUCE * REDUCE
+    # The sums are taken in double precision, or the scatter of a bright
+    # sky is lost in the rounding of its mean. Only the sums are: asking
+    # for the deviations themselves in double precision would make a
+    # double precision copy of the band, which is four bands of memory
+    # where the answer is a small array.
+    sums = np.einsum('ijkl->ik', blocks, dtype=np.float64)
+    squares = np.einsum('ijkl,ijkl->ik', blocks, blocks, dtype=np.float64)
+    variance = (squares - sums * sums / n_pixels) / (n_pixels - 1)
+    # A block whose pixels are all the same value can come out a hair
+    # below zero, and the square root of that is a warning and a NaN.
+    np.maximum(variance, 0.0, out=variance)
+    return np.sqrt(variance, out=variance)
+
+
+def block_mean_and_noise(image):
+    """
+    Average a whole image over blocks and measure its noise, in one pass.
+
+    Both are wanted for every frame that is loaded and both are made of
+    the same blocks of the same bands, so they are worked out together:
+    the frame is walked once rather than twice.
+
+    Parameters
+    ----------
+    image : `numpy.ndarray`
+        The full size frame.
+
+    Returns
+    -------
+    reduced : `numpy.ndarray`
+        The image averaged over blocks, as float32. Exactly what
+        `block_mean` gives.
+    noise : float
+        The typical scatter of the pixels of the frame about the mean of
+        their block, as `pixel_noise` describes it.
+    """
+    out = np.empty((-(-image.shape[0] // REDUCE), -(-image.shape[1] // REDUCE)),
+                   dtype=np.float32)
+    # One scatter per whole block of the frame, kept in an array of its
+    # own rather than gathered up band by band afterwards: the bands
+    # between them hold every whole block there is, since a band is a
+    # whole number of blocks deep.
+    scatter = np.empty((image.shape[0] // REDUCE, image.shape[1] // REDUCE),
+                       dtype=np.float32)
     for start, stop in iter_bands(image.shape[0]):
         band = image[start:stop]
-        rows, cols = (n - n % REDUCE for n in band.shape)
-        blocks = band[:rows, :cols].reshape(rows // REDUCE, REDUCE,
-                                            cols // REDUCE, REDUCE)
-        # In double precision, or the scatter of a bright sky is lost in
-        # the rounding of its mean.
-        scatter.append(blocks.std(axis=(1, 3), ddof=1, dtype=np.float64).ravel())
-    scatter = np.concatenate(scatter)
+        out[start // REDUCE:-(-stop // REDUCE)] = block_mean_band(band)
+        first_block = start // REDUCE
+        scatter[first_block:first_block + (stop - start) // REDUCE] = (
+            _band_scatter(band)
+        )
     scatter = scatter[np.isfinite(scatter)]
-    return float(np.median(scatter)) if scatter.size else 0.0
+    if not scatter.size:
+        return out, 0.0
+    # The finite scatters are an array of this function's own, so the
+    # median can shuffle it rather than take a copy to shuffle.
+    return out, float(np.median(scatter, overwrite_input=True))
 
 
 def read_frame(path):
@@ -253,36 +352,61 @@ def blank_missing_pixels(frames):
             frame[start:stop][missing] = np.nan
 
 
-def background_band(background_sm, start, stop, n_cols):
+def subtract_background_band(band, background_sm, start=0):
     """
-    Scale rows of a reduced background back up to the size of the frame.
+    Take a background fitted to the reduced image off a band of a frame.
 
-    Each value of a background fitted to the reduced image describes one
-    block of `REDUCE` by `REDUCE` pixels of the frame, so scaling it back
-    up is a plain repeat. It is one per band per colour, since the fit is
-    a different one for each colour.
+    Each value of the background describes one block of `REDUCE` by
+    `REDUCE` pixels of the frame, so scaling it back up is a plain
+    repeat. Repeating it makes a second array the size of the band, and
+    the band a caller hands over is a view of the frame it keeps, so the
+    answer has to be an array of its own: that is two bands where one
+    will do. The same arithmetic falls out of the band seen in blocks
+    with the reduced background broadcast against it, which is one array
+    the size of the band and nothing else.
 
     Parameters
     ----------
+    band : `numpy.ndarray`
+        Rows of one frame. It is left as it is.
     background_sm : `numpy.ndarray`
-        Background fitted to the reduced image.
-    start, stop : int
-        First row of the band and the row after its last, in full size
-        rows.
-    n_cols : int
-        Number of columns in the frame.
+        Background fitted to the reduced image of the whole frame.
+    start : int, optional
+        First row of the band, in full size rows. A multiple of `REDUCE`,
+        since the bands fall on the boundaries of the blocks.
 
     Returns
     -------
     `numpy.ndarray`
-        The background of this band, the same shape as the band.
+        The band with its background taken off, as float32.
     """
-    rows = background_sm[start // REDUCE:-(-stop // REDUCE)]
-    full = np.repeat(np.repeat(rows, REDUCE, axis=0), REDUCE, axis=1)
-    return full[:stop - start, :n_cols]
+    rows, cols = band.shape
+    background = background_sm[start // REDUCE:-(-(start + rows) // REDUCE)]
+    out = np.empty((rows, cols), dtype=np.float32)
+    blocks = _whole_blocks(band)
+    n_row_blocks, n_col_blocks = blocks.shape[0], blocks.shape[2]
+    np.subtract(
+        blocks,
+        background[:n_row_blocks, np.newaxis, :n_col_blocks, np.newaxis],
+        out=_whole_blocks(out),
+    )
+    # The pixels of a block that runs off the bottom or the right-hand
+    # edge of a frame that does not divide evenly. Their background is
+    # the last value of the row or the column of blocks they fall in,
+    # stretched out one value per pixel, which is a row or a column of
+    # them rather than a band of them.
+    whole_rows, whole_cols = n_row_blocks * REDUCE, n_col_blocks * REDUCE
+    if whole_cols < cols:
+        edge = np.repeat(background[:n_row_blocks, -1], REDUCE)
+        np.subtract(band[:whole_rows, whole_cols:], edge[:, np.newaxis],
+                    out=out[:whole_rows, whole_cols:])
+    if whole_rows < rows:
+        edge = np.repeat(background[-1], REDUCE)[:cols]
+        np.subtract(band[whole_rows:], edge, out=out[whole_rows:])
+    return out
 
 
-def scaled_band(band, interval, stretch, weight, background=None):
+def scaled_band(band, interval, stretch, weight, background=None, start=0):
     """
     Turn one band of one colour into the values that get displayed.
 
@@ -303,7 +427,12 @@ def scaled_band(band, interval, stretch, weight, background=None):
     weight : float
         Where this colour's slider in the mixer sits, 0 to 1.
     background : `numpy.ndarray`, optional
-        Background to subtract from the band first.
+        Background fitted to the reduced image of the whole frame, to
+        subtract from the band first.
+    start : int, optional
+        First row of the band in the frame, so that the right rows of the
+        background come off it. Zero, the default, is right for a band
+        that is the whole frame.
 
     Returns
     -------
@@ -314,7 +443,7 @@ def scaled_band(band, interval, stretch, weight, background=None):
     if background is not None:
         # Taking the background off makes an array of this band alone, and
         # it is ours, so the cuts can go back into it.
-        band = band - background
+        band = subtract_background_band(band, background, start)
         values = interval(band, out=band)
     else:
         # Here band is a view of the caller's frame, which has to be left
@@ -348,10 +477,8 @@ def _scaled_rows(image, start, stop, interval, stretch, weight,
     `numpy.ndarray`
         Values from 0 to 1, one per pixel of those rows.
     """
-    if background is not None:
-        background = background_band(background, start, stop, image.shape[1])
     return scaled_band(image[start:stop], interval, stretch, weight,
-                       background=background)
+                       background=background, start=start)
 
 
 def preview_plane(image, interval, stretch, weight, background=None):
@@ -755,11 +882,18 @@ class ColorImageMaker:
         blank_missing_pixels([self.data[c] for c in self._colors])
 
         for seed, color in enumerate(self._colors):
-            self.data_sm_raw[color] = block_mean(self.data[color])
+            self.data_sm_raw[color], noise = block_mean_and_noise(self.data[color])
+            # The made-up noise stays, on purpose. The block mean alone
+            # understates the noise of the frame, so the same cuts leave
+            # a viewer much darker than the preview and the saved file,
+            # and making the viewers' images the way the preview is made,
+            # by scaling every pixel and averaging afterwards, is too slow
+            # to do while images are loading.
+            #
             # Seeded, so that loading the same images again shows the
             # same thing, and differently for each colour.
             rng = np.random.default_rng(seed)
-            self.noise_sm[color] = pixel_noise(self.data[color]) * rng.standard_normal(
+            self.noise_sm[color] = noise * rng.standard_normal(
                 self.data_sm_raw[color].shape, dtype=np.float32
             )
 

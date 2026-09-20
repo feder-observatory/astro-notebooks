@@ -23,9 +23,9 @@ from astro_notebooks.color_image_maker import (
     COLORS,
     REDUCE,
     ColorImageMaker,
-    background_band,
     blank_missing_pixels,
     block_mean,
+    block_mean_and_noise,
     block_mean_band,
     iter_bands,
     pixel_noise,
@@ -35,7 +35,19 @@ from astro_notebooks.color_image_maker import (
     reduced_rgb_uint8,
     rgb_uint8,
     scaled_band,
+    subtract_background_band,
 )
+
+
+def _repeated_background(background_sm, band_shape, start=0):
+    """Scale a reduced background up to a band of a frame by repeating it.
+
+    This is the way the background used to come off a band, and what the
+    broadcast the code does now has to agree with, pixel for pixel.
+    """
+    rows = background_sm[start // REDUCE:-(-(start + band_shape[0]) // REDUCE)]
+    full = np.repeat(np.repeat(rows, REDUCE, axis=0), REDUCE, axis=1)
+    return full[:band_shape[0], :band_shape[1]]
 
 # Must be a multiple of the 8x thumbnail reduction, and large enough for the
 # 512 pixel background boxes used on the full-size frames.
@@ -564,6 +576,64 @@ def test_pixel_noise_of_a_frame_with_no_whole_block_is_zero():
     assert pixel_noise(np.full((64, 64), np.nan, dtype=np.float32)) == 0.0
 
 
+def _old_pixel_noise(image):
+    """Find the noise the way the two pass version of the code did.
+
+    It took the standard deviation of every whole block of every band in
+    double precision, which made double precision copies of the band on
+    the way, and took the median of them all.
+    """
+    scatter = []
+    for start, stop in iter_bands(image.shape[0]):
+        band = image[start:stop]
+        rows, cols = (n - n % REDUCE for n in band.shape)
+        blocks = band[:rows, :cols].reshape(rows // REDUCE, REDUCE,
+                                           cols // REDUCE, REDUCE)
+        scatter.append(blocks.std(axis=(1, 3), ddof=1, dtype=np.float64).ravel())
+    scatter = np.concatenate(scatter)
+    scatter = scatter[np.isfinite(scatter)]
+    return float(np.median(scatter)) if scatter.size else 0.0
+
+
+@pytest.mark.parametrize("shape", [BANDED_SHAPE, (603, 515), (5, 40)])
+def test_block_mean_and_noise_agrees_with_the_two_passes_it_replaces(shape):
+    """One pass gives the mean and the noise the two separate ones gave.
+
+    The reduced image is what the background is fitted to and what the
+    viewers show, so it has to be exactly what `block_mean` gives. The
+    noise is a sum of squares now rather than a standard deviation of
+    each block, which is not the same arithmetic, so it has only to agree
+    closely. The shapes include a frame that is not a whole number of
+    blocks and one too small to hold a single whole block.
+    """
+    rng = np.random.default_rng(13)
+    # A bright sky, which is where single precision sums would lose the
+    # scatter in the rounding of the mean.
+    image = rng.normal(40_000.0, 30.0, size=shape).astype(np.float32)
+
+    reduced, noise = block_mean_and_noise(image)
+
+    np.testing.assert_array_equal(reduced, block_mean(image))
+    assert noise == pytest.approx(_old_pixel_noise(image), rel=1e-4)
+
+
+def test_block_mean_and_noise_leaves_out_blocks_with_no_data():
+    """A block with a missing pixel gives no noise and does not poison it.
+
+    The scatter of such a block is a blank, and a blank among the numbers
+    the median is taken of would make the noise itself a blank, which
+    would then be added to every pixel of the viewer's image.
+    """
+    rng = np.random.default_rng(17)
+    image = rng.normal(300.0, 20.0, size=(64, 64)).astype(np.float32)
+    image[:, :11] = np.nan
+
+    _, noise = block_mean_and_noise(image)
+
+    assert noise == pytest.approx(20.0, rel=0.2)
+    assert noise == pytest.approx(_old_pixel_noise(image), rel=1e-4)
+
+
 def test_block_mean_band_leaves_missing_pixels_missing():
     """A block containing a pixel with no data has no data either.
 
@@ -626,8 +696,8 @@ def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
     exactly as it went in.
     """
     intervals, weights = cuts_and_weights
-    frame = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
-    background = np.linspace(0.0, 20.0, 64, dtype=np.float32).reshape(8, 8)
+    frame = np.linspace(-50.0, 900.0, 256, dtype=np.float32).reshape(16, 16)
+    background_sm = np.linspace(0.0, 20.0, 4, dtype=np.float32).reshape(2, 2)
     before = frame.copy()
 
     scaled_band(frame, intervals["green"], LogStretch(), weights["green"])
@@ -635,37 +705,81 @@ def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
     np.testing.assert_array_equal(frame, before)
 
     scaled = scaled_band(frame, intervals["green"], LogStretch(),
-                         weights["green"], background=background)
+                         weights["green"], background=background_sm)
 
     np.testing.assert_array_equal(frame, before)
     # Taking the background off first gives an array of its own, which is
     # the copy the in-place path is meant to be identical to.
     np.testing.assert_array_equal(
         scaled,
-        scaled_band(frame - background, intervals["green"], LogStretch(),
-                    weights["green"]),
+        scaled_band(frame - _repeated_background(background_sm, frame.shape),
+                    intervals["green"], LogStretch(), weights["green"]),
     )
 
 
-def test_background_band_repeats_each_reduced_value_over_its_block():
-    """A background fitted to the reduced image scales back up by repeat.
+def test_subtract_background_band_spreads_each_value_over_its_block():
+    """A background fitted to the reduced image scales back up by block.
 
-    Each value of the fit covers one block of the frame, and the rows
-    asked for are the rows of the frame that the band holds, even when
-    the band ends part way through a block.
+    Each value of the fit covers one block of the frame, and the rows it
+    is taken off are the rows of the frame that the band holds, even when
+    the band starts part way down the fit.
     """
     background_sm = np.arange(12, dtype=np.float32).reshape(3, 4)
+    band = np.zeros((12, 30), dtype=np.float32)
 
-    band = background_band(background_sm, 8, 20, n_cols=30)
+    taken_off = -subtract_background_band(band, background_sm, start=8)
 
-    assert band.shape == (12, 30)
+    assert taken_off.shape == (12, 30)
     # Row 8 of the frame is the second row of the reduced background.
-    np.testing.assert_array_equal(band[0, :REDUCE], np.full(REDUCE, 4.0))
-    np.testing.assert_array_equal(band[7, :REDUCE], np.full(REDUCE, 4.0))
+    np.testing.assert_array_equal(taken_off[0, :REDUCE], np.full(REDUCE, 4.0))
+    np.testing.assert_array_equal(taken_off[7, :REDUCE], np.full(REDUCE, 4.0))
     # The band stops four rows into the third row of the background, and
     # the frame stops six columns into its fourth value.
-    np.testing.assert_array_equal(band[8, :REDUCE], np.full(REDUCE, 8.0))
-    np.testing.assert_array_equal(band[8, -6:], np.full(6, 11.0))
+    np.testing.assert_array_equal(taken_off[8, :REDUCE], np.full(REDUCE, 8.0))
+    np.testing.assert_array_equal(taken_off[8, -6:], np.full(6, 11.0))
+
+
+@pytest.mark.parametrize("shape", [(256, 128), (100, 70), (12, 30), (5, 6)])
+def test_subtract_background_band_is_the_old_repeat_bit_for_bit(shape):
+    """Broadcasting the background off a band gives what repeating it gave.
+
+    Repeating the fit up to the size of the band cost a second array as
+    big as the band, which is what this replaces, so the answer has to be
+    identical to the last bit and not merely close: the bytes written to
+    the saved file are made of it. The shapes include frames whose rows
+    and columns are not whole numbers of blocks, where the blocks along
+    two edges are short.
+    """
+    rng = np.random.default_rng(3)
+    band = rng.normal(500.0, 30.0, size=shape).astype(np.float32)
+    background_sm = rng.normal(
+        480.0, 5.0, size=(-(-(shape[0] + 8) // REDUCE), -(-shape[1] // REDUCE))
+    ).astype(np.float32)
+
+    subtracted = subtract_background_band(band, background_sm, start=REDUCE)
+
+    assert subtracted.dtype == np.float32
+    np.testing.assert_array_equal(
+        subtracted,
+        band - _repeated_background(background_sm, shape, start=REDUCE),
+    )
+
+
+def test_subtract_background_band_leaves_the_band_alone():
+    """The band a caller hands over is a view of a frame it keeps.
+
+    Writing the answer into it would take the background off the frame
+    the viewers and the saved image are made from, once per band, every
+    time the preview was redrawn.
+    """
+    rng = np.random.default_rng(11)
+    frame = rng.normal(500.0, 30.0, size=(32, 64)).astype(np.float32)
+    background_sm = rng.normal(480.0, 5.0, size=(4, 8)).astype(np.float32)
+    before = frame.copy()
+
+    subtract_background_band(frame[8:24], background_sm, start=8)
+
+    np.testing.assert_array_equal(frame, before)
 
 
 @pytest.mark.parametrize(
