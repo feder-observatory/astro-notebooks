@@ -658,6 +658,11 @@ class ColorImageMaker:
         darker than the same cuts give in the preview and in the file,
         where they are applied to pixels that still have their noise.
         """
+        # Let go of the frames of any images loaded before. Each new frame
+        # would otherwise be read while all three old ones were still
+        # held, which is four frames at once where three are needed.
+        self.data.clear()
+        self.data_sm_raw.clear()
         for color, filter_name in zip(self._colors, self._filters):
             path = os.path.join(
                 self.image_directory, f'combined_light_filter_{filter_name}.fit'

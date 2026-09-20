@@ -957,3 +957,43 @@ def test_box_ticked_with_no_background_fitted_takes_nothing_off(maker):
     for color in COLORS:
         assert maker._scaling(color)["background"] is None
     assert "red" in maker.preview_planes
+
+
+def test_loading_other_images_holds_no_more_than_three_frames(tmp_path):
+    """Loading another set of images lets the old frames go first.
+
+    The frames are the biggest things there are, and a student who
+    combines again and points the widget at the result is loading a
+    second set. Reading the new red frame while the old red, green and
+    blue were all still held made four frames at the peak where three
+    are ever needed.
+    """
+    directories = []
+    for seed, name in enumerate(["first", "second"]):
+        directory = tmp_path / name
+        directory.mkdir()
+        rng = np.random.default_rng(seed)
+        for filt in FILTERS:
+            data = rng.uniform(100.0, 1000.0, size=BIG_IMAGE_SHAPE)
+            hdu = fits.PrimaryHDU(data.astype(np.float32))
+            hdu.header["BUNIT"] = "adu"
+            hdu.header["OBJECT"] = name
+            hdu.writeto(directory / f"combined_light_filter_{filt}.fit")
+        directories.append(str(directory))
+
+    # Traced from before the first frames are read, so that letting them
+    # go counts.
+    tracemalloc.start()
+    try:
+        big = ColorImageMaker(directories[0])
+        frame_bytes = big.data["red"].nbytes
+        tracemalloc.reset_peak()
+        big.image_directory = directories[1]
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert big.object_name == "second"
+    # Three frames and the small things made from them come to about
+    # three and a half; with the old frames still held it was over four.
+    assert peak < 3.9 * frame_bytes
