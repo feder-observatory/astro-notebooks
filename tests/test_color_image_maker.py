@@ -19,6 +19,7 @@ from astropy.visualization import (
 )
 
 from astro_notebooks.color_image_maker import (
+    BAND_ROWS,
     COLORS,
     REDUCE,
     ColorImageMaker,
@@ -28,9 +29,10 @@ from astro_notebooks.color_image_maker import (
     block_mean_band,
     iter_bands,
     pixel_noise,
+    png_bytes,
     preview_plane,
     read_frame,
-    reduced_png_bytes,
+    reduced_rgb_uint8,
     rgb_uint8,
     scaled_band,
 )
@@ -215,6 +217,65 @@ def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch
     assert saved.exists()
     rgb = mimg.imread(saved)
     assert rgb.shape[:2] == IMAGE_SHAPE
+
+
+def test_save_tab_shows_the_image_it_would_save(maker, tmp_path, monkeypatch):
+    """The picture on the save tab is the file that would be written.
+
+    The tab used to build the whole full size image and hand it to Pillow
+    to be reduced. It is now built at the size it is shown, band by band,
+    and the order of operations is what makes that the same picture: each
+    band is scaled to the bytes that would be saved and only then
+    averaged. Averaging the frames first, as the notebook once did to the
+    preview, would lift the sky instead.
+    """
+    monkeypatch.chdir(tmp_path)
+    maker.level_sliders["red"].value = (100.0, 900.0)
+    maker.mix_sliders["blue"].value = 0.3
+
+    maker.widget.selected_index = 2
+
+    shown = np.asarray(
+        Image.open(io.BytesIO(maker.widget.children[2].children[3].value))
+    )
+    saved = maker._full_res_rgb()
+    assert shown.shape == (IMAGE_SHAPE[0] // 4, IMAGE_SHAPE[1] // 4, 3)
+    for plane in range(3):
+        np.testing.assert_allclose(
+            shown[:, :, plane], _block_means(saved[:, :, plane], factor=4), atol=1
+        )
+
+
+def test_opening_the_save_tab_makes_nothing_the_size_of_the_saved_image(big_maker):
+    """Opening the save tab does not build the image that would be saved.
+
+    It used to build all of it, 50 MB of bytes at 4096 by 4096, and hand
+    it to Pillow, which has no way of encoding an RGB array without
+    copying it, for the sake of a picture a quarter of the size on a
+    side: about 100 MB against the gigabyte a student has on the hub, and
+    the largest transient left on the tab that was killing kernels. The
+    picture is now made band by band at the size it is shown, so opening
+    the tab costs a band and the picture rather than the image itself.
+    """
+    saved_bytes = 3 * big_maker.data["red"].size
+    band_bytes = BAND_ROWS * BIG_IMAGE_SHAPE[1] * np.dtype(np.float32).itemsize
+    # Opening the tab once first, so that what is measured is the picture
+    # being made and not whatever a widget does the first time it is shown.
+    big_maker.widget.selected_index = 2
+    big_maker.widget.selected_index = 0
+
+    tracemalloc.start()
+    try:
+        big_maker.widget.selected_index = 2
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    # The picture was made, and is what was measured.
+    assert big_maker.widget.children[2].children[3].value
+    # A few bands' worth, since the cuts and the stretch do not make one
+    # array of a band, and a few bands are a fraction of the image.
+    assert peak < 4 * band_bytes < saved_bytes
 
 
 def test_save_writes_the_images_loaded_now(maker, tmp_path, monkeypatch):
@@ -690,20 +751,51 @@ def test_saved_image_is_what_the_old_path_wrote(
     np.testing.assert_array_equal(new, old)
 
 
-def test_reduced_png_bytes_is_a_smaller_png(ragged_frames, cuts_and_weights):
-    """The Save tab is given a PNG smaller than the image it shows.
+def test_reduced_rgb_uint8_is_the_saved_image_averaged(
+    ragged_frames, cuts_and_weights
+):
+    """The picture the Save tab shows is the saved image, seen smaller.
+
+    It is built band by band at a quarter of the size, so it never holds
+    the saved image to reduce it, and each of its pixels has to come out
+    as the mean of the block of saved bytes it stands for. The frame is
+    several bands tall, with a short last band, so the rows of the
+    picture a band fills are worth checking too, and the pixels with no
+    data must be the black they are in the file rather than a blank.
+    """
+    intervals, weights = cuts_and_weights
+    scalings = _scalings(intervals, LinearStretch(), weights)
+    blank_missing_pixels([ragged_frames[color] for color in COLORS])
+
+    shown = reduced_rgb_uint8(ragged_frames, scalings, factor=4)
+
+    saved = rgb_uint8(ragged_frames, scalings)
+    assert shown.dtype == np.uint8
+    assert shown.shape == (
+        -(-BANDED_SHAPE[0] // 4), -(-BANDED_SHAPE[1] // 4), 3
+    )
+    for plane in range(3):
+        np.testing.assert_allclose(
+            shown[:, :, plane],
+            _block_means(saved[:, :, plane], factor=4),
+            atol=1,
+        )
+
+
+def test_png_bytes_encodes_the_picture_it_is_given(ragged_frames, cuts_and_weights):
+    """The Save tab is given a PNG of the picture, at the picture's size.
 
     Drawing the full size image as a matplotlib figure is what used to
-    make the save tab unusable; a reduced PNG shows the same thing for a
+    make the save tab unusable; a small PNG shows the same thing for a
     fraction of the memory.
     """
     intervals, weights = cuts_and_weights
     scalings = _scalings(intervals, LinearStretch(), weights)
-    png = reduced_png_bytes(rgb_uint8(ragged_frames, scalings), factor=4)
+    png = png_bytes(reduced_rgb_uint8(ragged_frames, scalings, factor=4))
 
     shown = Image.open(io.BytesIO(png))
     assert shown.format == "PNG"
-    assert shown.size == (BANDED_SHAPE[1] // 4, BANDED_SHAPE[0] // 4)
+    assert shown.size == (-(-BANDED_SHAPE[1] // 4), -(-BANDED_SHAPE[0] // 4))
 
 
 def _write_images_with_empty_edges(directory, object_name):

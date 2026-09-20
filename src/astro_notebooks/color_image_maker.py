@@ -75,7 +75,7 @@ def iter_bands(n_rows, band_rows=BAND_ROWS):
         yield start, min(start + band_rows, n_rows)
 
 
-def _block_counts(n_pixels):
+def _block_counts(n_pixels, factor=REDUCE):
     """
     Number of real pixels in each block along one axis of a frame.
 
@@ -83,44 +83,50 @@ def _block_counts(n_pixels):
     ----------
     n_pixels : int
         Length of the axis.
+    factor : int, optional
+        How many pixels on a side go into one block.
 
     Returns
     -------
     `numpy.ndarray`
-        One count per block, all `REDUCE` except the last, which is
+        One count per block, all `factor` except the last, which is
         short if the axis does not divide evenly.
     """
-    counts = np.full(-(-n_pixels // REDUCE), float(REDUCE))
-    counts[-1] = n_pixels - REDUCE * (len(counts) - 1)
+    counts = np.full(-(-n_pixels // factor), float(factor))
+    counts[-1] = n_pixels - factor * (len(counts) - 1)
     return counts
 
 
-def block_mean_band(band):
+def block_mean_band(band, factor=REDUCE):
     """
-    Average one band of rows over blocks of `REDUCE` by `REDUCE` pixels.
+    Average one band of rows over blocks of `factor` by `factor` pixels.
 
     Parameters
     ----------
     band : `numpy.ndarray`
         The rows to average.
+    factor : int, optional
+        How many pixels on a side go into one block. `REDUCE` for the
+        preview and the viewers; the picture on the Save tab is made of
+        the bytes of the saved image four at a time.
 
     Returns
     -------
     `numpy.ndarray`
         The mean of each block. A block that runs off the edge of the
         frame is the mean of the pixels it does have, so an axis whose
-        length is not a multiple of `REDUCE` still reduces to
-        ``ceil(length / REDUCE)`` values.
+        length is not a multiple of `factor` still reduces to
+        ``ceil(length / factor)`` values.
     """
     rows, cols = band.shape
-    pad_rows, pad_cols = -rows % REDUCE, -cols % REDUCE
+    pad_rows, pad_cols = -rows % factor, -cols % factor
     if pad_rows or pad_cols:
         band = np.pad(band, ((0, pad_rows), (0, pad_cols)))
-        counts = np.outer(_block_counts(rows), _block_counts(cols))
+        counts = np.outer(_block_counts(rows, factor), _block_counts(cols, factor))
     else:
-        counts = REDUCE * REDUCE
-    sums = band.reshape(band.shape[0] // REDUCE, REDUCE,
-                        band.shape[1] // REDUCE, REDUCE).sum(axis=(1, 3))
+        counts = factor * factor
+    sums = band.reshape(band.shape[0] // factor, factor,
+                        band.shape[1] // factor, factor).sum(axis=(1, 3))
     return sums / counts
 
 
@@ -386,14 +392,42 @@ def preview_plane(image, interval, stretch, weight, background=None):
     return out
 
 
+def _band_bytes(image, start, stop, **scaling):
+    """
+    Turn rows of one full size frame into the bytes that get written.
+
+    The image that gets saved and the picture the Save tab shows are both
+    made of these, so that the two cannot be made of different
+    arithmetic.
+
+    Parameters
+    ----------
+    image : `numpy.ndarray`
+        The full size frame of one colour.
+    start, stop : int
+        First row wanted and the row after the last.
+    **scaling
+        The ``interval``, ``stretch``, ``weight`` and ``background``
+        arguments of `scaled_band`.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        One byte per pixel of those rows. The values are truncated rather
+        than rounded, which is what `matplotlib.image.imsave` did to the
+        floating point image the notebook used to hand it, so that the
+        file that is saved is unchanged.
+    """
+    scaled = _scaled_rows(image, start, stop, **scaling)
+    # scaled is this band's own array, so the bytes can be made of it in
+    # place rather than of a copy.
+    scaled *= 255
+    return scaled.astype(np.uint8)
+
+
 def rgb_uint8(frames, scalings):
     """
     Make the image that gets saved, one byte per colour per pixel.
-
-    The values are truncated rather than rounded, which is what
-    `matplotlib.image.imsave` did to the floating point image the
-    notebook used to hand it, so that the file that is saved is
-    unchanged.
 
     Parameters
     ----------
@@ -413,25 +447,59 @@ def rgb_uint8(frames, scalings):
     out = np.empty(shape + (3,), dtype=np.uint8)
     for start, stop in iter_bands(shape[0]):
         for plane, color in enumerate(COLORS):
-            scaled = _scaled_rows(frames[color], start, stop,
-                                  **scalings[color])
-            out[start:stop, :, plane] = (scaled * 255).astype(np.uint8)
+            out[start:stop, :, plane] = _band_bytes(frames[color], start, stop,
+                                                    **scalings[color])
     return out
 
 
-def reduced_png_bytes(rgb, factor=4):
+def reduced_rgb_uint8(frames, scalings, factor=4):
     """
-    Encode a smaller copy of the saved image as a PNG.
+    Make the image that gets saved, `factor` times smaller.
 
-    The Save tab shows this instead of drawing a 20 by 20 inch figure of
-    the full size image.
+    This is the picture the Save tab shows. Each band is scaled to the
+    bytes that would be written and averaged over blocks as it is made,
+    so the picture is the saved image seen smaller, and the saved image
+    itself is never in memory: at 4096 by 4096 that is a 50 MB array, and
+    about as much again in Pillow, which has no way of encoding an RGB
+    array without copying it first.
+
+    Parameters
+    ----------
+    frames : dict
+        The full size frame of each colour in `COLORS`.
+    scalings : dict
+        How each colour is to be scaled, as for `rgb_uint8`.
+    factor : int, optional
+        How many pixels on a side go into one pixel of the picture. It
+        divides `BAND_ROWS`, so that every band but the last is a whole
+        number of blocks.
+
+    Returns
+    -------
+    `numpy.ndarray`
+        The picture, ``(rows, columns, 3)`` of uint8, each pixel the
+        rounded mean of the block of the saved image it stands for.
+    """
+    shape = frames[COLORS[0]].shape
+    out = np.empty((-(-shape[0] // factor), -(-shape[1] // factor), 3),
+                   dtype=np.uint8)
+    for start, stop in iter_bands(shape[0]):
+        for plane, color in enumerate(COLORS):
+            band = _band_bytes(frames[color], start, stop, **scalings[color])
+            out[start // factor:-(-stop // factor), :, plane] = np.round(
+                block_mean_band(band, factor)
+            )
+    return out
+
+
+def png_bytes(rgb):
+    """
+    Encode a picture as a PNG.
 
     Parameters
     ----------
     rgb : `numpy.ndarray`
-        The image, ``(rows, columns, 3)`` of uint8.
-    factor : int, optional
-        How many times smaller to make it.
+        The picture, ``(rows, columns, 3)`` of uint8.
 
     Returns
     -------
@@ -439,7 +507,7 @@ def reduced_png_bytes(rgb, factor=4):
         The PNG, ready for an `ipywidgets.Image`.
     """
     buffer = io.BytesIO()
-    Image.fromarray(rgb).reduce(factor).save(buffer, format='png')
+    Image.fromarray(rgb).save(buffer, format='png')
     return buffer.getvalue()
 
 
@@ -604,15 +672,16 @@ class ColorImageMaker:
             layout={'width': '400px'},
         )
         status_html = ipw.HTML('')
-        # A PNG of the finished image, made smaller so that the browser is
-        # not asked to show sixteen million pixels.
-        full_res_display = ipw.Image(format='png', layout={'width': '100%'})
+        # A PNG of the finished image, made smaller as it is made, so that
+        # neither the kernel nor the browser is asked to hold sixteen
+        # million pixels.
+        reduced_display = ipw.Image(format='png', layout={'width': '100%'})
         save_button = ipw.Button(description='Save image', button_style='success')
         save_status_label = ipw.Label('')
 
         def refresh():
-            status_html.value = '<p style="padding:10px 0">Generating full resolution image…</p>'
-            full_res_display.value = reduced_png_bytes(self._full_res_rgb())
+            status_html.value = '<p style="padding:10px 0">Making the picture…</p>'
+            reduced_display.value = png_bytes(self._reduced_rgb())
             status_html.value = ''
 
         def _reset_save_button():
@@ -631,9 +700,10 @@ class ColorImageMaker:
                 save_status_label.value = f'{filename} already exists. Click again to overwrite.'
                 return
 
-            # The full size image is made again here rather than kept from
-            # when the tab was opened: it takes half a second, and keeping
-            # it would hold 50 MB for as long as the widget lives.
+            # This is the only place the full size image is built. The tab
+            # shows a quarter size picture made band by band, so the 50 MB
+            # of it is here for as long as Pillow takes to write the file
+            # and no longer.
             Image.fromarray(self._full_res_rgb()).save(filename)
             save_status_label.value = f'Saved: {filename}'
             _reset_save_button()
@@ -646,7 +716,7 @@ class ColorImageMaker:
             filename_input,
             ipw.HBox([save_button, save_status_label]),
             status_html,
-            full_res_display,
+            reduced_display,
         ])
         return widget, refresh
 
@@ -781,12 +851,30 @@ class ColorImageMaker:
         """
         Build the finished image at full size, ready to be written out.
 
+        Only saving needs this. The Save tab shows `_reduced_rgb`, which
+        is the same image a quarter of the size on a side and is built
+        without this one ever existing.
+
         Returns
         -------
         `numpy.ndarray`
             The image, ``(rows, columns, 3)`` of uint8.
         """
         return rgb_uint8(self.data, {c: self._scaling(c) for c in self._colors})
+
+    def _reduced_rgb(self):
+        """
+        Build the picture the Save tab shows, band by band.
+
+        Returns
+        -------
+        `numpy.ndarray`
+            The finished image four times smaller on a side,
+            ``(rows, columns, 3)`` of uint8.
+        """
+        return reduced_rgb_uint8(
+            self.data, {c: self._scaling(c) for c in self._colors}
+        )
 
     def _preview_plane(self, color):
         """
