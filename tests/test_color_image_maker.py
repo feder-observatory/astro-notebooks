@@ -751,19 +751,55 @@ def test_scaled_band_is_the_clipped_weighted_stretch(cuts_and_weights):
     """One band is cut, stretched, weighted, doubled and clipped.
 
     This is the one expression the preview and the saved image are both
-    made of. Pixels with no data come out black rather than as a blank,
-    because a blank cannot be written into an image file.
+    made of, so the answers are worked out here by hand rather than by a
+    second way of writing the same arithmetic. With cuts of 0 to 500 and
+    a mixer weight of 0.8 a pixel comes out at 1.6 times its place
+    between the cuts: one at or below the black point is black, and
+    anything the doubling pushes past one is pulled back to one so that
+    it still fits in a byte. Which place between the cuts a pixel lands
+    on is the stretch's doing, so a log stretch is checked as well.
     """
     intervals, weights = cuts_and_weights
-    band = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
-    band[0, 0] = np.nan
-    stretch = LogStretch()
+    band = np.array([[-50.0, 0.0, 125.0],
+                     [250.0, 312.5, 900.0]], dtype=np.float32)
 
-    scaled = scaled_band(band, intervals["red"], stretch, weights["red"])
+    scaled = scaled_band(band, intervals["red"], LinearStretch(),
+                         weights["red"])
 
-    expected = 2 * weights["red"] * stretch(intervals["red"](band))
-    expected = np.nan_to_num(np.clip(expected, 0, 1))
-    np.testing.assert_allclose(scaled, expected, rtol=1e-12)
+    np.testing.assert_allclose(
+        scaled, [[0.0, 0.0, 0.4], [0.8, 1.0, 1.0]], rtol=1e-6
+    )
+
+    # A log stretch sends a pixel a fraction f of the way between the cuts
+    # to log(1000 * f + 1) / log(1001) of the way up, so the pixel that
+    # comes out half way up, at 1.6 * 0.5, is the one with 1000 * f + 1
+    # equal to the square root of 1001. That is about three hundredths of
+    # the way between the cuts, not half way.
+    faint = np.array([[500.0 * (np.sqrt(1001.0) - 1.0) / 1000.0]],
+                     dtype=np.float32)
+
+    lifted = scaled_band(faint, intervals["red"], LogStretch(),
+                         weights["red"])
+
+    np.testing.assert_allclose(lifted, [[0.8]], rtol=1e-6)
+
+
+def test_scaled_band_blacks_out_pixels_with_no_data(cuts_and_weights):
+    """A pixel with no data comes out black, and its neighbour untouched.
+
+    Reprojection leaves blanks along the edges of a frame and a blank
+    cannot be written into an image file, so those pixels have to come
+    out as the black byte. The pass that blacks them out runs over the
+    whole band, so an ordinary pixel beside one must still be exactly
+    where the cuts, the stretch and the weight put it.
+    """
+    intervals, weights = cuts_and_weights
+    band = np.array([[np.nan, 250.0]], dtype=np.float32)
+
+    scaled = scaled_band(band, intervals["red"], LinearStretch(),
+                         weights["red"])
+
+    np.testing.assert_allclose(scaled, [[0.0, 0.8]], rtol=1e-6)
 
 
 def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
@@ -943,6 +979,44 @@ def test_saved_image_is_what_the_old_path_wrote(
     buffer.seek(0)
     old = np.asarray(Image.open(buffer).convert("RGB"))
     np.testing.assert_array_equal(new, old)
+
+
+def test_saved_image_loses_the_background_of_its_own_rows(
+    ragged_frames, cuts_and_weights
+):
+    """Each band of the saved image has its own rows of background taken off.
+
+    The image is made a band at a time and the background is fitted to
+    the reduced image of the whole frame, so a band has to be told where
+    in the frame it starts or it takes off the background of the top of
+    the frame instead. The backgrounds here climb steeply down the frame,
+    and differently for each colour, so every band after the first would
+    show that, and so would a colour given another colour's background.
+    The answer is the image of the frames with the scaled up background
+    taken off them whole, which leaves the bands nothing to get wrong.
+    """
+    intervals, weights = cuts_and_weights
+    blank_missing_pixels([ragged_frames[color] for color in COLORS])
+    reduced_shape = (BANDED_SHAPE[0] // REDUCE, BANDED_SHAPE[1] // REDUCE)
+    down, across = np.indices(reduced_shape, dtype=np.float32)
+    backgrounds = {
+        color: (plane + 1) * (4 * down + across)
+        for plane, color in enumerate(COLORS)
+    }
+    scalings = _scalings(intervals, LogStretch(), weights)
+    with_background = {
+        color: dict(scalings[color], background=backgrounds[color])
+        for color in COLORS
+    }
+
+    saved = rgb_uint8(ragged_frames, with_background)
+
+    subtracted = {
+        color: ragged_frames[color]
+        - _repeated_background(backgrounds[color], BANDED_SHAPE)
+        for color in COLORS
+    }
+    np.testing.assert_array_equal(saved, rgb_uint8(subtracted, scalings))
 
 
 def test_reduced_rgb_uint8_is_the_saved_image_averaged(

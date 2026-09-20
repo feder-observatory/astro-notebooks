@@ -434,8 +434,13 @@ def scaled_band(band, interval, stretch, weight, background=None, start=0):
         values = interval(band)
     values = stretch(values, out=values, clip=False)
     values *= 2 * weight
-    np.clip(values, 0, 1, out=values)
-    np.nan_to_num(values, copy=False)
+    # The cuts have already clipped to 0..1, so what can be out of range by
+    # now is a value the doubling took past 1, and a NaN where there is no
+    # data. Of a NaN and a number fmax gives back the number, which blacks
+    # out those pixels in place, with none of the masks the size of the
+    # band that nan_to_num makes.
+    np.fmax(values, 0, out=values)
+    np.minimum(values, 1, out=values)
     return values
 
 
