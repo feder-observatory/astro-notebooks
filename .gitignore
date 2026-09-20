@@ -163,8 +163,10 @@ cython_debug/
 
 # Images and data left behind by running the notebooks in the source tree.
 # Anything not ignored here ends up in the wheel.
-*.png
-*.fit
-*.fits
+# Anchored to the top of the repository, so that a picture added for the
+# documentation, or anything called combined further down, is not ignored.
+/*.png
+/*.fit
+/*.fits
 # No trailing slash, so this also matches a symlink to a folder of images
-combined
+/combined
