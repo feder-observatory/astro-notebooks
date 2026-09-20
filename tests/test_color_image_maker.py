@@ -981,6 +981,44 @@ def test_saved_image_is_what_the_old_path_wrote(
     np.testing.assert_array_equal(new, old)
 
 
+def test_saved_image_loses_the_background_of_its_own_rows(
+    ragged_frames, cuts_and_weights
+):
+    """Each band of the saved image has its own rows of background taken off.
+
+    The image is made a band at a time and the background is fitted to
+    the reduced image of the whole frame, so a band has to be told where
+    in the frame it starts or it takes off the background of the top of
+    the frame instead. The backgrounds here climb steeply down the frame,
+    and differently for each colour, so every band after the first would
+    show that, and so would a colour given another colour's background.
+    The answer is the image of the frames with the scaled up background
+    taken off them whole, which leaves the bands nothing to get wrong.
+    """
+    intervals, weights = cuts_and_weights
+    blank_missing_pixels([ragged_frames[color] for color in COLORS])
+    reduced_shape = (BANDED_SHAPE[0] // REDUCE, BANDED_SHAPE[1] // REDUCE)
+    down, across = np.indices(reduced_shape, dtype=np.float32)
+    backgrounds = {
+        color: (plane + 1) * (4 * down + across)
+        for plane, color in enumerate(COLORS)
+    }
+    scalings = _scalings(intervals, LogStretch(), weights)
+    with_background = {
+        color: dict(scalings[color], background=backgrounds[color])
+        for color in COLORS
+    }
+
+    saved = rgb_uint8(ragged_frames, with_background)
+
+    subtracted = {
+        color: ragged_frames[color]
+        - _repeated_background(backgrounds[color], BANDED_SHAPE)
+        for color in COLORS
+    }
+    np.testing.assert_array_equal(saved, rgb_uint8(subtracted, scalings))
+
+
 def test_reduced_rgb_uint8_is_the_saved_image_averaged(
     ragged_frames, cuts_and_weights
 ):
