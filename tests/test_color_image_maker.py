@@ -766,6 +766,33 @@ def test_scaled_band_is_the_clipped_weighted_stretch(cuts_and_weights):
     np.testing.assert_allclose(scaled, expected, rtol=1e-12)
 
 
+def test_scaled_band_gives_pixels_that_are_not_numbers_a_value(cuts_and_weights):
+    """A blank or infinite pixel comes out as a value an image can hold.
+
+    A pixel with no data is black, one that is infinitely bright is as
+    bright as the colour goes, and one that is infinitely dark is black.
+    The pixels beside them are not touched by the clean-up: they come out
+    as they do from a band with ordinary numbers in those places.
+    """
+    intervals, weights = cuts_and_weights
+    band = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
+    ordinary = scaled_band(band, intervals["blue"], LogStretch(),
+                           weights["blue"])
+    band[0, 0] = np.nan
+    band[3, 4] = np.inf
+    band[7, 7] = -np.inf
+
+    with np.errstate(invalid="ignore"):
+        scaled = scaled_band(band, intervals["blue"], LogStretch(),
+                             weights["blue"])
+
+    assert scaled[0, 0] == 0
+    assert scaled[3, 4] == 1
+    assert scaled[7, 7] == 0
+    untouched = np.isfinite(band)
+    np.testing.assert_array_equal(scaled[untouched], ordinary[untouched])
+
+
 def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
     """Scaling a band never writes into the frame it came from.
 
