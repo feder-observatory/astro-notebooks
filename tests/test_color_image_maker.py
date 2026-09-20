@@ -917,3 +917,23 @@ def test_read_frame_gives_the_image_and_its_header(combined_dir):
     assert frame.dtype.byteorder in "=|"
     assert header["OBJECT"] == "m 101"
     np.testing.assert_array_equal(frame, fits.getdata(str(path)))
+
+
+def test_read_frame_finds_an_image_that_is_not_in_the_primary_hdu(tmp_path):
+    """The image is read from the first HDU that has data.
+
+    A compressed file, or one written with several extensions, has an
+    empty primary HDU and its image, with the ``OBJECT`` keyword, in the
+    first extension. ``CCDData.read`` reads such a file, so reading the
+    frames band by band must too.
+    """
+    data = np.arange(64 * 48, dtype=np.float32).reshape(64, 48)
+    image_hdu = fits.ImageHDU(data)
+    image_hdu.header["OBJECT"] = "m 101"
+    path = tmp_path / "image_in_extension.fit"
+    fits.HDUList([fits.PrimaryHDU(), image_hdu]).writeto(path)
+
+    frame, header = read_frame(str(path))
+
+    assert header["OBJECT"] == "m 101"
+    np.testing.assert_array_equal(frame, data)

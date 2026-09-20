@@ -17,6 +17,8 @@ from astrowidgets.bqplot import ImageWidget
 from matplotlib import pyplot as plt
 from photutils.background import Background2D, MeanBackground
 
+from .image_quality import _image_hdu
+
 #: The colours of the image, in the order they are stored in it.
 COLORS = ['red', 'green', 'blue']
 
@@ -193,17 +195,20 @@ def read_frame(path):
     Parameters
     ----------
     path : str
-        A FITS file with its image in the primary HDU.
+        A FITS file. Its image is taken from the first HDU that has
+        data, which is where ``CCDData.read`` looks for it too, so a file
+        with an empty primary HDU and the image in an extension, as a
+        compressed file has, can be read.
 
     Returns
     -------
     frame : `numpy.ndarray`
         The image, as float32 in this machine's byte order.
     header : `astropy.io.fits.Header`
-        The header of the primary HDU.
+        The header of the HDU the image came from.
     """
     with fits.open(path, memmap=True) as hdu_list:
-        hdu = hdu_list[0]
+        hdu = _image_hdu(hdu_list)
         frame = np.empty(hdu.shape, dtype=np.float32)
         for start, stop in iter_bands(hdu.shape[0]):
             frame[start:stop] = hdu.section[start:stop]
