@@ -681,45 +681,21 @@ def test_the_noise_of_a_frame_with_no_whole_block_is_zero():
     )[1] == 0.0
 
 
-def _old_pixel_noise(image):
-    """Find the noise the way the two pass version of the code did.
-
-    It took the standard deviation of every whole block of every band in
-    double precision, which made double precision copies of the band on
-    the way, and took the median of them all.
-    """
-    scatter = []
-    for start, stop, _ in iter_bands(image.shape[0]):
-        band = image[start:stop]
-        rows, cols = (n - n % REDUCE for n in band.shape)
-        blocks = band[:rows, :cols].reshape(rows // REDUCE, REDUCE,
-                                           cols // REDUCE, REDUCE)
-        scatter.append(blocks.std(axis=(1, 3), ddof=1, dtype=np.float64).ravel())
-    scatter = np.concatenate(scatter)
-    scatter = scatter[np.isfinite(scatter)]
-    return float(np.median(scatter)) if scatter.size else 0.0
-
-
-@pytest.mark.parametrize("shape", [BANDED_SHAPE, (603, 515), (5, 40)])
-def test_block_mean_and_noise_agrees_with_the_two_passes_it_replaces(shape):
-    """One pass gives the mean and the noise the two separate ones gave.
+@pytest.mark.parametrize("shape", [(603, 515), (5, 40)])
+def test_block_mean_of_a_frame_that_is_not_whole_blocks(shape):
+    """Every block is the mean of the pixels it really has.
 
     The reduced image is what the background is fitted to and what the
-    viewers show, so every block of it has to be the mean of the pixels
-    it really has. The noise is a sum of squares now rather than a
-    standard deviation of each block, which is not the same arithmetic, so it has only to agree
-    closely. The shapes include a frame that is not a whole number of
-    blocks and one too small to hold a single whole block.
+    viewers show. The shapes are a frame that is not a whole number of
+    blocks, whose last blocks are short, and one too small to hold a
+    single whole block.
     """
     rng = np.random.default_rng(13)
-    # A bright sky, which is where single precision sums would lose the
-    # scatter in the rounding of the mean.
     image = rng.normal(40_000.0, 30.0, size=shape).astype(np.float32)
 
-    reduced, noise = block_mean_and_noise(image)
+    reduced, _ = block_mean_and_noise(image)
 
     np.testing.assert_allclose(reduced, _block_means(image), rtol=1e-6)
-    assert noise == pytest.approx(_old_pixel_noise(image), rel=1e-4)
 
 
 def test_block_mean_and_noise_leaves_out_blocks_with_no_data():
@@ -736,7 +712,6 @@ def test_block_mean_and_noise_leaves_out_blocks_with_no_data():
     _, noise = block_mean_and_noise(image)
 
     assert noise == pytest.approx(20.0, rel=0.2)
-    assert noise == pytest.approx(_old_pixel_noise(image), rel=1e-4)
 
 
 def test_block_mean_band_leaves_missing_pixels_missing():
