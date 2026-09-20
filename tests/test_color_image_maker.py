@@ -198,7 +198,7 @@ def test_save_tab_renders_and_saves_full_resolution(maker, tmp_path, monkeypatch
     """
     # The image is saved relative to the cwd.
     monkeypatch.chdir(tmp_path)
-    maker.r_slider.value = 0.7
+    maker.mix_sliders["red"].value = 0.7
 
     # Selecting the save tab generates the full resolution image.
     maker.widget.selected_index = 2
@@ -311,7 +311,7 @@ def test_preview_is_drawn_only_while_its_tab_is_open(maker, monkeypatch):
     maker.widget.selected_index = 1
     assert len(drawn) == 1
 
-    maker.r_slider.value = 0.8
+    maker.mix_sliders["red"].value = 0.8
     assert len(drawn) == 2
 
 
@@ -726,7 +726,7 @@ def test_preview_is_the_saved_image_averaged(maker):
     """
     maker.level_sliders["green"].value = (30.0, 800.0)
     maker.stretch_chooser.value = "log"
-    maker.g_slider.value = 0.35
+    maker.mix_sliders["green"].value = 0.35
 
     plane = maker._preview_plane("green")
 

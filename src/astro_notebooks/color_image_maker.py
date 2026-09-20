@@ -19,8 +19,16 @@ from photutils.background import Background2D, MeanBackground
 
 from .image_quality import _image_hdu
 
+#: Which filter's frame becomes which colour of the image, in the order
+#: the colours are stored in it.
+COLOR_FILTERS = {'red': 'rp', 'green': 'V', 'blue': 'B'}
+
 #: The colours of the image, in the order they are stored in it.
-COLORS = ['red', 'green', 'blue']
+COLORS = list(COLOR_FILTERS)
+
+#: The colour whose file's header the object's name is read from. All
+#: three frames are of the same object, so any one of them would do.
+OBJECT_NAME_COLOR = 'blue'
 
 #: How many rows of a full size frame are worked on at a time. Nothing the
 #: size of a whole frame is ever made; a band of this many rows is.
@@ -442,7 +450,6 @@ class ColorImageMaker:
     """
 
     _colors = COLORS
-    _filters = ['rp', 'V', 'B']
     _stretches = {
         'linear': LinearStretch(),
         'log': LogStretch(),
@@ -508,12 +515,9 @@ class ColorImageMaker:
             style={'description_width': 'initial'},
         )
 
-        self.r_slider = self._make_rgb_slider('Red')
-        self.g_slider = self._make_rgb_slider('Green')
-        self.b_slider = self._make_rgb_slider('Blue')
-        self.mix_sliders = dict(zip(
-            self._colors, [self.r_slider, self.g_slider, self.b_slider]
-        ))
+        self.mix_sliders = {
+            c: self._make_rgb_slider(c.capitalize()) for c in self._colors
+        }
 
         self._build_bw_tab()
         self._build_color_tab()
@@ -569,7 +573,7 @@ class ColorImageMaker:
         """Build tab 2: RGB mix sliders and live preview."""
         self.preview_output = ipw.Output()
         self.rgb_mixer = ipw.VBox(
-            [self.r_slider, self.g_slider, self.b_slider, self.preview_output],
+            [*self.mix_sliders.values(), self.preview_output],
             layout={'width': '90%'},
         )
 
@@ -663,12 +667,12 @@ class ColorImageMaker:
         # held, which is four frames at once where three are needed.
         self.data.clear()
         self.data_sm_raw.clear()
-        for color, filter_name in zip(self._colors, self._filters):
+        for color, filter_name in COLOR_FILTERS.items():
             path = os.path.join(
                 self.image_directory, f'combined_light_filter_{filter_name}.fit'
             )
             self.data[color], header = read_frame(path)
-            if color == 'blue':
+            if color == OBJECT_NAME_COLOR:
                 self.object_name = header['OBJECT']
 
         blank_missing_pixels([self.data[c] for c in self._colors])
