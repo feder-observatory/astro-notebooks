@@ -274,8 +274,11 @@ def test_opening_the_save_tab_makes_nothing_the_size_of_the_saved_image(big_make
     band_bytes = BAND_ROWS * BIG_IMAGE_SHAPE[1] * np.dtype(np.float32).itemsize
     # Opening the tab once first, so that what is measured is the picture
     # being made and not whatever a widget does the first time it is shown.
+    # The cuts are then moved, since the picture is otherwise kept rather
+    # than made again and there would be nothing to measure.
     big_maker.widget.selected_index = 2
     big_maker.widget.selected_index = 0
+    big_maker.level_sliders["red"].value = (100.0, 900.0)
 
     tracemalloc.start()
     try:
@@ -387,6 +390,71 @@ def test_preview_is_drawn_only_while_its_tab_is_open(maker, monkeypatch):
 
     maker.mix_sliders["red"].value = 0.8
     assert len(drawn) == 2
+
+
+def test_the_save_picture_is_made_only_when_it_has_changed(maker, monkeypatch):
+    """The save tab makes its picture when it must, and not on every visit.
+
+    Making it is a pass over all three frames, about half a second on
+    full size images, and it used to be paid every time the tab was
+    opened, for a picture that could not have changed since the last
+    one. It is made the first time the tab is opened, not again on
+    coming back to it with nothing changed, and again once a level
+    slider, the mixer, the stretch or the background box has changed
+    what it would show.
+    """
+    made = []
+    refresh = maker._refresh_save
+    monkeypatch.setattr(
+        maker, "_refresh_save", lambda: (made.append(1), refresh())[1]
+    )
+
+    maker.widget.selected_index = 2
+    assert len(made) == 1
+
+    maker.widget.selected_index = 0
+    maker.widget.selected_index = 2
+    assert len(made) == 1
+
+    maker.widget.selected_index = 0
+    maker.level_sliders["red"].value = (200.0, 900.0)
+    # Nothing is drawn for a tab nobody is looking at.
+    assert len(made) == 1
+    assert maker._save_stale
+
+    maker.widget.selected_index = 2
+    assert len(made) == 2
+
+    for change in [
+        lambda: setattr(maker.mix_sliders["blue"], "value", 0.2),
+        lambda: setattr(maker.stretch_chooser, "value", "sqrt"),
+        lambda: setattr(maker.subtract_bkgd_checkbox, "value", True),
+    ]:
+        maker.widget.selected_index = 0
+        change()
+        maker.widget.selected_index = 2
+    assert len(made) == 5
+
+
+def test_changing_the_picture_while_the_save_tab_is_open_redraws_it(maker):
+    """A change made while the save tab is on screen reaches the picture.
+
+    There is no tab change to wait for then, so the picture has to be
+    made again straight away, as the preview is, or the tab would go on
+    showing an image the widget would no longer save.
+    """
+    maker.widget.selected_index = 2
+    shown = maker.widget.children[2].children[3]
+    png_before = shown.value
+
+    maker.mix_sliders["red"].value = 0.9
+
+    assert shown.value != png_before
+    assert not maker._save_stale
+    np.testing.assert_array_equal(
+        np.asarray(Image.open(io.BytesIO(shown.value))),
+        maker._reduced_rgb(),
+    )
 
 
 def test_setting_image_directory_reloads(maker, tmp_path):

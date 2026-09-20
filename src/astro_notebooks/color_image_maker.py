@@ -676,6 +676,10 @@ class ColorImageMaker:
         # is opened, so that a slider on the first tab does not pay for a
         # pass over a frame to draw something nobody is looking at.
         self._preview_stale = True
+        # The same for the picture on the Save tab, which is another pass
+        # over all three frames. Coming back to that tab with nothing
+        # changed used to make the picture again.
+        self._save_stale = True
 
         self._build_widgets()
         self._load_data()
@@ -693,9 +697,7 @@ class ColorImageMaker:
             self._load_data()
             # Loading draws nothing, which is right for a new widget, but
             # here the old object may already be on screen.
-            self._remake_preview()
-            if self.widget.selected_index == 2:
-                self._refresh_save()
+            self._settings_changed()
 
     # ------------------------------------------------------------------
     # Widget construction
@@ -781,7 +783,7 @@ class ColorImageMaker:
         # observers redraw the preview themselves.
         for color, slider in self.mix_sliders.items():
             slider.observe(
-                lambda change, color=color: self._remake_preview(color),
+                lambda change, color=color: self._settings_changed(color),
                 names='value',
             )
         self.subtract_bkgd_checkbox.observe(self._on_subtract_change, names='value')
@@ -807,6 +809,7 @@ class ColorImageMaker:
             status_html.value = '<p style="padding:10px 0">Making the picture…</p>'
             reduced_display.value = png_bytes(self._reduced_rgb())
             status_html.value = ''
+            self._save_stale = False
 
         def _reset_save_button():
             save_button.description = 'Save image'
@@ -1052,31 +1055,35 @@ class ColorImageMaker:
         """
         def observer(change):
             self.image_widgets[color].set_cuts(ManualInterval(*change['new']))
-            self._remake_preview(color)
+            self._settings_changed(color)
         return observer
 
-    def _remake_preview(self, *colors):
+    def _settings_changed(self, *colors):
         """
-        Throw away some colours of the preview, and redraw it if it is seen.
+        Note that the pictures are out of date, and redraw the one on screen.
 
         The cuts, the stretch, the background and the weight in the mix
-        are all applied before the image is averaged, so a change to any
-        of them means another pass over the frame. That pass is made now
-        only if the preview's tab is the one on screen; otherwise it is
-        left until the tab is opened.
+        are all applied before an image is averaged, so a change to any
+        of them means another pass over the frames for the preview and
+        another for the picture on the Save tab. That pass is made now
+        only for the tab that is on screen; the other is left until its
+        tab is opened.
 
         Parameters
         ----------
         *colors : str
-            The colours, from `COLORS`, whose planes are out of date.
-            None at all still redraws, for when the planes have already
-            been thrown away.
+            The colours, from `COLORS`, whose preview planes are out of
+            date. None at all still redraws, for when the planes have
+            already been thrown away.
         """
         for color in colors:
             self.preview_planes.pop(color, None)
         self._preview_stale = True
+        self._save_stale = True
         if self.widget.selected_index == 1:
             self._update_preview()
+        elif self.widget.selected_index == 2:
+            self._refresh_save()
 
     def _stretch_observer(self, change):
         """
@@ -1089,7 +1096,7 @@ class ColorImageMaker:
         """
         for color in self._colors:
             self.image_widgets[color].set_stretch(self._stretches[change['new']])
-        self._remake_preview(*self._colors)
+        self._settings_changed(*self._colors)
 
     def _update_preview(self):
         """Draw the colour preview from the three planes."""
@@ -1113,8 +1120,9 @@ class ColorImageMaker:
         """
         Bring the tab that has just been opened up to date.
 
-        The preview is drawn if anything has changed since it was last
-        drawn, and the finished image is built for the Save tab.
+        Each of the two pictures costs a pass over all three frames, so
+        neither is made again for a tab that is opened with nothing
+        changed since it was last looked at.
 
         Parameters
         ----------
@@ -1123,7 +1131,7 @@ class ColorImageMaker:
         """
         if change['new'] == 1 and self._preview_stale:
             self._update_preview()
-        elif change['new'] == 2:
+        elif change['new'] == 2 and self._save_stale:
             self._refresh_save()
 
     def _on_subtract_change(self, change):
@@ -1151,7 +1159,7 @@ class ColorImageMaker:
             self.image_widgets[color].set_stretch(
                 self._stretches[self.stretch_chooser.value]
             )
-        self._remake_preview(*self._colors)
+        self._settings_changed(*self._colors)
 
     # ------------------------------------------------------------------
     # Jupyter display
