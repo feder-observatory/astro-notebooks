@@ -25,11 +25,9 @@ from astro_notebooks.color_image_maker import (
     SAVE_REDUCE,
     ColorImageMaker,
     blank_missing_pixels,
-    block_mean,
     block_mean_and_noise,
     block_mean_band,
     iter_bands,
-    pixel_noise,
     png_bytes,
     preview_plane,
     read_frame,
@@ -530,7 +528,7 @@ def _full_res_rgb(maker):
 def _block_means(image, factor=REDUCE):
     """The mean of each block of the image, written out block by block.
 
-    A slow but obvious reference for `block_mean`: it works for any image
+    A slow but obvious reference for the block means: it works for any image
     size, and a block that hangs off the edge of the image is the mean of
     the pixels that are really there.
     """
@@ -619,7 +617,7 @@ def test_iter_bands_covers_every_row():
     rows of the reduced image it averages into, which run on from one
     band to the next and take in the short block at the bottom.
     """
-    bands = list(iter_bands(600, band_rows=256))
+    bands = list(iter_bands(600))
 
     assert [(start, stop) for start, stop, _ in bands] == [
         (0, 256), (256, 512), (512, 600)
@@ -632,7 +630,7 @@ def test_iter_bands_covers_every_row():
     ]
 
 
-def test_block_mean_matches_block_reduce():
+def test_block_mean_and_noise_matches_block_reduce():
     """Averaging band by band gives what astropy gives in one go.
 
     ``block_reduce`` is what the viewers' images used to be made with,
@@ -642,7 +640,7 @@ def test_block_mean_matches_block_reduce():
     rng = np.random.default_rng(99)
     image = rng.uniform(0.0, 1000.0, size=BANDED_SHAPE).astype(np.float32)
 
-    reduced = block_mean(image)
+    reduced, _ = block_mean_and_noise(image)
 
     assert reduced.dtype == np.float32
     np.testing.assert_allclose(
@@ -660,13 +658,13 @@ def test_block_mean_of_a_frame_that_does_not_divide_evenly():
     rng = np.random.default_rng(7)
     image = rng.uniform(0.0, 1000.0, size=(100, 120)).astype(np.float32)
 
-    reduced = block_mean(image)
+    reduced, _ = block_mean_and_noise(image)
 
     assert reduced.shape == (13, 15)
     np.testing.assert_allclose(reduced, _block_means(image), rtol=1e-6)
 
 
-def test_pixel_noise_is_the_noise_of_the_sky_and_not_the_stars():
+def test_the_noise_is_the_sky_and_not_the_stars():
     """The noise found is the sky's, whatever else is in the frame.
 
     The frame has a bright sky with Gaussian noise of a known size, stars
@@ -683,18 +681,20 @@ def test_pixel_noise_is_the_noise_of_the_sky_and_not_the_stars():
         image[row:row + 4, col:col + 4] += 5000.0
     image[:, :11] = np.nan
 
-    assert pixel_noise(image) == pytest.approx(30.0, rel=0.03)
+    assert block_mean_and_noise(image)[1] == pytest.approx(30.0, rel=0.03)
 
 
-def test_pixel_noise_of_a_frame_with_no_whole_block_is_zero():
+def test_the_noise_of_a_frame_with_no_whole_block_is_zero():
     """A frame too small, or too empty, to measure gets no noise added.
 
     Nothing can be said about the noise of a frame smaller than one block
     or of one with no data in it, and zero leaves the viewers' images as
     they were rather than filling them with NaN.
     """
-    assert pixel_noise(np.ones((5, 40), dtype=np.float32)) == 0.0
-    assert pixel_noise(np.full((64, 64), np.nan, dtype=np.float32)) == 0.0
+    assert block_mean_and_noise(np.ones((5, 40), dtype=np.float32))[1] == 0.0
+    assert block_mean_and_noise(
+        np.full((64, 64), np.nan, dtype=np.float32)
+    )[1] == 0.0
 
 
 def _old_pixel_noise(image):
@@ -721,9 +721,9 @@ def test_block_mean_and_noise_agrees_with_the_two_passes_it_replaces(shape):
     """One pass gives the mean and the noise the two separate ones gave.
 
     The reduced image is what the background is fitted to and what the
-    viewers show, so it has to be exactly what `block_mean` gives. The
-    noise is a sum of squares now rather than a standard deviation of
-    each block, which is not the same arithmetic, so it has only to agree
+    viewers show, so every block of it has to be the mean of the pixels
+    it really has. The noise is a sum of squares now rather than a
+    standard deviation of each block, which is not the same arithmetic, so it has only to agree
     closely. The shapes include a frame that is not a whole number of
     blocks and one too small to hold a single whole block.
     """
@@ -734,7 +734,7 @@ def test_block_mean_and_noise_agrees_with_the_two_passes_it_replaces(shape):
 
     reduced, noise = block_mean_and_noise(image)
 
-    np.testing.assert_array_equal(reduced, block_mean(image))
+    np.testing.assert_allclose(reduced, _block_means(image), rtol=1e-6)
     assert noise == pytest.approx(_old_pixel_noise(image), rel=1e-4)
 
 
@@ -1237,14 +1237,13 @@ def test_viewer_noise_is_as_big_as_the_noise_of_the_frame(maker):
 
     The image the background is fitted to stays the plain block mean,
     and what the viewer shows differs from it by noise with the scatter
-    `pixel_noise` finds in the full size frame.
+    `block_mean_and_noise` finds in the full size frame.
     """
     for color in COLORS:
-        np.testing.assert_array_equal(
-            maker.data_sm_raw[color], block_mean(maker.data[color])
-        )
+        reduced, noise = block_mean_and_noise(maker.data[color])
+        np.testing.assert_array_equal(maker.data_sm_raw[color], reduced)
         added = maker.data_sm[color] - maker.data_sm_raw[color]
-        assert added.std() == pytest.approx(pixel_noise(maker.data[color]), rel=0.05)
+        assert added.std() == pytest.approx(noise, rel=0.05)
         assert abs(added.mean()) < 0.05 * added.std()
 
 

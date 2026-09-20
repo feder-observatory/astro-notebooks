@@ -31,7 +31,9 @@ COLORS = list(COLOR_FILTERS)
 OBJECT_NAME_COLOR = 'blue'
 
 #: How many rows of a full size frame are worked on at a time. Nothing the
-#: size of a whole frame is ever made; a band of this many rows is.
+#: size of a whole frame is ever made; a band of this many rows is. It is a
+#: multiple of `REDUCE`, so that the bands fall on the boundaries of the
+#: blocks the preview averages over.
 BAND_ROWS = 256
 
 #: How many pixels on a side are averaged into one pixel of the preview and
@@ -76,7 +78,7 @@ def _n_blocks(n_pixels, factor=REDUCE):
     return -(-n_pixels // factor)
 
 
-def iter_bands(n_rows, band_rows=BAND_ROWS, factor=REDUCE):
+def iter_bands(n_rows, factor=REDUCE):
     """
     Split a frame into bands of rows, with the blocks each band fills.
 
@@ -88,10 +90,6 @@ def iter_bands(n_rows, band_rows=BAND_ROWS, factor=REDUCE):
     ----------
     n_rows : int
         Number of rows in the frame.
-    band_rows : int, optional
-        Number of rows in a band. A multiple of `factor`, so that the
-        bands fall on the boundaries of the blocks the preview averages
-        over.
     factor : int, optional
         How many pixels on a side go into one block of a reduced image.
 
@@ -105,8 +103,8 @@ def iter_bands(n_rows, band_rows=BAND_ROWS, factor=REDUCE):
         The rows of the reduced image the band averages into, which a
         caller that reduces nothing ignores.
     """
-    for start in range(0, n_rows, band_rows):
-        stop = min(start + band_rows, n_rows)
+    for start in range(0, n_rows, BAND_ROWS):
+        stop = min(start + BAND_ROWS, n_rows)
         yield start, stop, slice(start // factor, _n_blocks(stop, factor))
 
 
@@ -195,62 +193,6 @@ def block_mean_band(band, factor=REDUCE):
     return sums / counts
 
 
-def block_mean(image):
-    """
-    Average a whole image over blocks, a band of rows at a time.
-
-    This is the reduced image the background is fitted to, and what the
-    viewers on the first tab show once the noise has been put back (see
-    `pixel_noise`). It is the same answer `astropy.nddata.block_reduce`
-    gives for a frame that divides evenly, without making anything the
-    size of the frame along the way.
-
-    Parameters
-    ----------
-    image : `numpy.ndarray`
-        The image to average.
-
-    Returns
-    -------
-    `numpy.ndarray`
-        The reduced image, as float32.
-    """
-    out = np.empty((_n_blocks(image.shape[0]), _n_blocks(image.shape[1])),
-                   dtype=np.float32)
-    for start, stop, rows in iter_bands(image.shape[0]):
-        out[rows] = block_mean_band(image[start:stop])
-    return out
-
-
-def pixel_noise(image):
-    """
-    Typical scatter of the pixels of a frame about the mean of their block.
-
-    Averaging over blocks takes most of the noise out of an image, so the
-    cuts and the stretch do something different to the reduced image than
-    they do to the frame: a sky that sits on the black point is black in
-    the one and a grey glow in the other. Noise of this size, added to
-    the reduced image, makes it respond to the cuts the way the frame
-    does. It is the noise `block_mean_and_noise` finds, which is where
-    the loading of a frame gets it, alongside the reduced image itself.
-
-    Parameters
-    ----------
-    image : `numpy.ndarray`
-        The full size frame.
-
-    Returns
-    -------
-    float
-        The median, over the whole blocks of the frame, of the standard
-        deviation of the pixels within a block. The median keeps the
-        stars out of it: inside a block with a star in it the scatter is
-        the shape of the star rather than noise. Blocks with missing
-        pixels are left out, and the answer is 0 if no block is left.
-    """
-    return block_mean_and_noise(image)[1]
-
-
 def _band_scatter(band):
     """
     Scatter of the pixels within each whole block of a band of rows.
@@ -301,11 +243,19 @@ def block_mean_and_noise(image):
     Returns
     -------
     reduced : `numpy.ndarray`
-        The image averaged over blocks, as float32. Exactly what
-        `block_mean` gives.
+        The image averaged over blocks, as float32: the reduced image
+        the background is fitted to and the viewers on the first tab
+        show. It is the same answer `astropy.nddata.block_reduce` gives
+        for a frame that divides evenly, without making anything the
+        size of the frame along the way.
     noise : float
-        The typical scatter of the pixels of the frame about the mean of
-        their block, as `pixel_noise` describes it.
+        The median, over the whole blocks of the frame, of the standard
+        deviation of the pixels within a block. The median keeps the
+        stars out of it: inside a block with a star in it the scatter is
+        the shape of the star rather than noise. Blocks with missing
+        pixels are left out, and the answer is 0 if no block is left.
+        Noise of this size, added to the reduced image, makes it respond
+        to the cuts the way the frame does.
     """
     out = np.empty((_n_blocks(image.shape[0]), _n_blocks(image.shape[1])),
                    dtype=np.float32)
