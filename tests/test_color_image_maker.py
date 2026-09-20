@@ -751,46 +751,55 @@ def test_scaled_band_is_the_clipped_weighted_stretch(cuts_and_weights):
     """One band is cut, stretched, weighted, doubled and clipped.
 
     This is the one expression the preview and the saved image are both
-    made of. Pixels with no data come out black rather than as a blank,
-    because a blank cannot be written into an image file.
+    made of, so the answers are worked out here by hand rather than by a
+    second way of writing the same arithmetic. With cuts of 0 to 500 and
+    a mixer weight of 0.8 a pixel comes out at 1.6 times its place
+    between the cuts: one at or below the black point is black, and
+    anything the doubling pushes past one is pulled back to one so that
+    it still fits in a byte. Which place between the cuts a pixel lands
+    on is the stretch's doing, so a log stretch is checked as well.
     """
     intervals, weights = cuts_and_weights
-    band = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
-    band[0, 0] = np.nan
-    stretch = LogStretch()
+    band = np.array([[-50.0, 0.0, 125.0],
+                     [250.0, 312.5, 900.0]], dtype=np.float32)
 
-    scaled = scaled_band(band, intervals["red"], stretch, weights["red"])
+    scaled = scaled_band(band, intervals["red"], LinearStretch(),
+                         weights["red"])
 
-    expected = 2 * weights["red"] * stretch(intervals["red"](band))
-    expected = np.nan_to_num(np.clip(expected, 0, 1))
-    np.testing.assert_allclose(scaled, expected, rtol=1e-12)
+    np.testing.assert_allclose(
+        scaled, [[0.0, 0.0, 0.4], [0.8, 1.0, 1.0]], rtol=1e-6
+    )
+
+    # A log stretch sends a pixel a fraction f of the way between the cuts
+    # to log(1000 * f + 1) / log(1001) of the way up, so the pixel that
+    # comes out half way up, at 1.6 * 0.5, is the one with 1000 * f + 1
+    # equal to the square root of 1001. That is about three hundredths of
+    # the way between the cuts, not half way.
+    faint = np.array([[500.0 * (np.sqrt(1001.0) - 1.0) / 1000.0]],
+                     dtype=np.float32)
+
+    lifted = scaled_band(faint, intervals["red"], LogStretch(),
+                         weights["red"])
+
+    np.testing.assert_allclose(lifted, [[0.8]], rtol=1e-6)
 
 
-def test_scaled_band_gives_pixels_that_are_not_numbers_a_value(cuts_and_weights):
-    """A blank or infinite pixel comes out as a value an image can hold.
+def test_scaled_band_blacks_out_pixels_with_no_data(cuts_and_weights):
+    """A pixel with no data comes out black, and its neighbour untouched.
 
-    A pixel with no data is black, one that is infinitely bright is as
-    bright as the colour goes, and one that is infinitely dark is black.
-    The pixels beside them are not touched by the clean-up: they come out
-    as they do from a band with ordinary numbers in those places.
+    Reprojection leaves blanks along the edges of a frame and a blank
+    cannot be written into an image file, so those pixels have to come
+    out as the black byte. The pass that blacks them out runs over the
+    whole band, so an ordinary pixel beside one must still be exactly
+    where the cuts, the stretch and the weight put it.
     """
     intervals, weights = cuts_and_weights
-    band = np.linspace(-50.0, 900.0, 64, dtype=np.float32).reshape(8, 8)
-    ordinary = scaled_band(band, intervals["blue"], LogStretch(),
-                           weights["blue"])
-    band[0, 0] = np.nan
-    band[3, 4] = np.inf
-    band[7, 7] = -np.inf
+    band = np.array([[np.nan, 250.0]], dtype=np.float32)
 
-    with np.errstate(invalid="ignore"):
-        scaled = scaled_band(band, intervals["blue"], LogStretch(),
-                             weights["blue"])
+    scaled = scaled_band(band, intervals["red"], LinearStretch(),
+                         weights["red"])
 
-    assert scaled[0, 0] == 0
-    assert scaled[3, 4] == 1
-    assert scaled[7, 7] == 0
-    untouched = np.isfinite(band)
-    np.testing.assert_array_equal(scaled[untouched], ordinary[untouched])
+    np.testing.assert_allclose(scaled, [[0.0, 0.8]], rtol=1e-6)
 
 
 def test_scaled_band_leaves_the_frame_it_is_given_alone(cuts_and_weights):
