@@ -937,3 +937,23 @@ def test_read_frame_finds_an_image_that_is_not_in_the_primary_hdu(tmp_path):
 
     assert header["OBJECT"] == "m 101"
     np.testing.assert_array_equal(frame, data)
+
+
+def test_box_ticked_with_no_background_fitted_takes_nothing_off(maker):
+    """With the box ticked but no background fitted, nothing is subtracted.
+
+    The box can be left ticked with no fit behind it, when the fit was
+    skipped because no images were loaded or a reload failed after the
+    old fits were thrown away. Reading the controls then raised a
+    ``KeyError`` inside an observer, and the widget stopped responding
+    without saying why.
+    """
+    maker.subtract_bkgd_checkbox.value = True
+    maker.bkgd_sm.clear()
+    maker.widget.selected_index = 1
+
+    maker.level_sliders["red"].value = (150.0, 900.0)
+
+    for color in COLORS:
+        assert maker._scaling(color)["background"] is None
+    assert "red" in maker.preview_planes

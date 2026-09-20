@@ -756,7 +756,9 @@ class ColorImageMaker:
             interval=ManualInterval(*self.level_sliders[color].value),
             stretch=self._stretches[self.stretch_chooser.value],
             weight=self.mix_sliders[color].value,
-            background=self.bkgd_sm[color] if subtract else None,
+            # The box can be ticked with nothing fitted, if the fit was
+            # never made or a reload failed part way; nothing comes off then.
+            background=self.bkgd_sm.get(color) if subtract else None,
         )
 
     def _full_res_rgb(self):
