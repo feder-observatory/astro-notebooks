@@ -173,3 +173,11 @@ cython_debug/
 
 # Written by hatch-vcs on every build
 src/astro_notebooks/_version.py
+
+# Jupyter server state and editor settings
+.jupyter/
+.jupyter_ystore.db
+.vscode/
+
+# Scratch notebooks at the top of the repository; the real ones live in src/
+/*.ipynb
