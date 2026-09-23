@@ -1,3 +1,11 @@
+"""Reproject frames of a night onto the same pixel grid.
+
+Each frame of a night is reprojected onto the pixel grid of a reference
+frame using its WCS, optionally subtracting each frame's median first so
+that frames taken with small pointing differences line up before being
+combined.
+"""
+
 import numpy as np
 from astropy.nddata import CCDData
 from reproject import reproject_interp
