@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from astro_notebooks import image_selector
 from astro_notebooks.image_selector import SELECTION_FILE_NAME, ImageSelect
 
 # Two of these differ only in their extension, so they share a stem.

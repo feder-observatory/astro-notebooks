@@ -5,24 +5,21 @@ build-backend = "hatchling.build"
 [project]
 name = "astro-notebooks"
 dynamic = ["version"]
-description = ''
+description = "Jupyter notebooks and widgets for combining, selecting and colouring Feder Observatory images"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "BSD-3-Clause"
-keywords = []
+keywords = ["astronomy", "jupyter", "fits", "ccdproc"]
 authors = [
   { name = "Matt Craig", email = "mattwcraig@gmail.com" },
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
   "jupyter-app-launcher",
@@ -100,6 +97,11 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "if TYPE_CHECKING:",
 ]
+
+[tool.ruff.lint]
+# The rules ruff turned on by default when this was written; ruff has
+# widened its defaults since, and CI installs whatever version is current.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
