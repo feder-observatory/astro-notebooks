@@ -1,3 +1,19 @@
+"""Widgets for selecting frames of a night to combine.
+
+`ImageSelect` shows a thumbnail and star measurements per frame,
+with a checkbox to choose which frames to keep. `SelectedCombiner`
+combines only the checked frames and writes a manifest listing them.
+
+Thumbnails and star measurements are cached in a directory next to the
+images and reused across sessions when the FITS files' modification times
+are unchanged, making the widget quick to open if it has been used before.
+
+The checkbox selection, the combination manifest, and the quality
+measurements cache are all written atomically: each is written to a
+temporary file and then renamed into place. If a crash happens, no
+half-written file is left behind.
+"""
+
 import html
 import io
 import json
@@ -119,7 +135,7 @@ def write_selection_manifest(isel, destination, run_label, included=None):
     (relative to that data directory).
 
     Pass ``included`` when the combination has already happened, as
-    :class:`SelectedCombiner` does, so that the manifest lists the frames
+    `SelectedCombiner` does, so that the manifest lists the frames
     that were actually combined even if a checkbox has changed since.
     """
     destination = Path(destination)
@@ -481,8 +497,6 @@ def _flag_span(text, flagged):
 
 
 class ImageWithSelector(ipw.VBox):
-    # value = tr.Bool(default_value=True).tag(sync=True)
-
     # The box drawn around each tile, and the space inside and outside it.
     TILE_BORDER = '1px solid #9e9e9e'
     TILE_PADDING = '6px'
@@ -528,7 +542,6 @@ class ImageWithSelector(ipw.VBox):
         )
 
         ipw.link((self._selector, 'value'), (self._valid_mark, 'value'))
-        # ipw.link((self, 'value'), (self._selector, 'value'))
 
         self.select_box = ipw.HBox(children=[self._selector, self._valid_mark])
         self.mobox = ipw.VBox(children=[self._name, self._quality,
@@ -1102,7 +1115,14 @@ class ImageSelect(ipw.VBox):
         for fname in self._im_file_names:
             try:
                 mtimes[fname] = os.path.getmtime(self.path / fname)
-            except OSError:
+            except OSError as err:
+                # Only a cache: the measurements are still shown, and are made
+                # again next time. The widget must open regardless.
+                warnings.warn(
+                    f'Could not save the star measurements to '
+                    f'{self.quality_path}: {fname} could not be read '
+                    f'({err!r}). They will be made again next time.',
+                    stacklevel=2)
                 return
         try:
             _atomic_write_json(self.quality_path, {

@@ -694,6 +694,12 @@ class ColorImageMaker:
 
     @property
     def image_directory(self):
+        """The directory the three combined images are read from.
+
+        Assigning a new directory reads the three frames again and drops
+        the fitted backgrounds. They are fitted again at once if background
+        subtraction is ticked, and otherwise not until it is.
+        """
         return self._image_directory
 
     @image_directory.setter

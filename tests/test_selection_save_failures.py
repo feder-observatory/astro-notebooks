@@ -214,3 +214,39 @@ def test_read_only_directory_still_opens(read_only_dir):
     w._selectors[2]._selector.value = False
     assert (fits_dir / SELECTION_FILE_NAME).read_bytes() == original
     assert not list(fits_dir.glob('*.tmp'))
+
+
+def test_missing_file_at_cache_write_warns_and_keeps_widget(fits_dir):
+    """A missing image file during cache write warns and keeps the widget open.
+
+    The widget is created normally, then one FITS file is deleted from the
+    directory. When the quality cache is written, the missing file causes a
+    warning, but the widget's selectors are still present and the previously
+    written cache file is unchanged.
+    """
+    selector = ImageSelect(directory=fits_dir)
+    assert len(selector._selectors) > 0
+
+    # Get the initial state of the quality cache file
+    quality_path = selector.quality_path
+    if quality_path.exists():
+        initial_content = quality_path.read_bytes()
+    else:
+        initial_content = None
+
+    # Delete one of the FITS files
+    deleted_file = fits_dir / ALL_NAMES[0]
+    deleted_file.unlink()
+
+    # Try to write the quality cache; it should warn about the deleted file
+    with pytest.warns(UserWarning, match='could not be read'):
+        selector._write_quality_cache()
+
+    # The widget's selectors should still be present
+    assert len(selector._selectors) > 0
+
+    # The quality cache file should not have been updated
+    if initial_content is not None:
+        assert quality_path.read_bytes() == initial_content
+    else:
+        assert not quality_path.exists()
