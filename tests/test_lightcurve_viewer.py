@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from astropy.table import QTable, Table
+from astropy.time import Time
+from astropy.table import MaskedColumn, QTable, Table
 
 from astro_notebooks.lightcurve_viewer import (
     LightCurveViewer,
@@ -320,6 +321,25 @@ def test_nan_error_keeps_point_but_not_bar():
 
 def test_source_list_without_marker_name_column(table):
     assert star_options(table, Table({"star_id": [1, 2]}))[0] == ("  1", 1)
+
+
+def test_masked_time_and_column_give_nan():
+    mask = [False, True, False]
+    t = QTable(
+        {
+            "bjd": Time(
+                np.ma.array([2459910.0, 2459910.1, 2459910.2], mask=mask),
+                format="jd",
+                scale="tdb",
+            ),
+            "relative_flux": MaskedColumn([1.0, 2.0, 3.0], mask=mask),
+        }
+    )
+    x, _ = x_axis_values(t, "BJD")
+    np.testing.assert_allclose(x, [2459910.0, np.nan, 2459910.2])
+    values, errors = quantity_values(t, "Relative flux")
+    np.testing.assert_allclose(values, [1.0, np.nan, 3.0])
+    assert errors is None
 
 
 def test_empty_selection_gives_no_marks(table, source_list):

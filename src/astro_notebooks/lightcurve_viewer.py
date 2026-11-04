@@ -2,13 +2,14 @@ import ipywidgets as ipw
 import numpy as np
 from astropy.table import Table
 from bqplot import Axis, Figure, LinearScale, Lines, Scatter
+from bqplot.colorschemes import CATEGORY10
 
 # Marker names (in the source list) of the stars a student most likely
 # wants to see first.
 DEFAULT_MARKER_NAMES = ("TESS Targets", "VSX")
 
 # bqplot's own colour cycle, so each star gets a colour of its own.
-COLORS = list(Lines().colors)
+COLORS = list(CATEGORY10)
 
 X_AXIS_CHOICES = ("BJD", "Hours since first image", "Airmass")
 
@@ -175,7 +176,8 @@ def star_options(table, source_list=None):
     """
     names = _marker_names(source_list)
     options = []
-    for star_id in sorted({int(s) for s in table["star_id"]}):
+    star_ids = np.asarray(table["star_id"]).astype(int)
+    for star_id in sorted({int(s) for s in star_ids}):
         if star_id in names:
             label = f"{star_id:3d} {names[star_id]}"
         else:
@@ -315,9 +317,9 @@ class LightCurveViewer(ipw.HBox):
             self.stars,
             self.offset,
             self.error_bars,
-            self.title,
         ):
             widget.observe(self._on_change, names="value")
+        self.title.observe(self._on_title, names="value")
         self._redraw()
 
     @staticmethod
@@ -335,7 +337,7 @@ class LightCurveViewer(ipw.HBox):
 
     def _passband_table(self):
         """The rows of the table in the chosen passband."""
-        in_band = np.array([str(p) == self.passband.value for p in self.table["passband"]])
+        in_band = np.asarray(self.table["passband"]).astype(str) == self.passband.value
         return self.table[in_band]
 
     def _update_note(self):
@@ -376,8 +378,10 @@ class LightCurveViewer(ipw.HBox):
             self._update_star_options()
         finally:
             self._building = False
-        self._update_note()
         self._redraw()
+
+    def _on_title(self, change):
+        self.figure.title = change["new"]
 
     def _on_change(self, change):
         if change["owner"] is self.quantity:
@@ -402,11 +406,7 @@ class LightCurveViewer(ipw.HBox):
         data = self._passband_table()
         x_all, x_label = x_axis_values(data, choice, self._reference_bjd)
         y_all, err_all = quantity_values(data, quantity)
-        ids = np.array([int(s) for s in data["star_id"]])
-        self.x_scale.min = None
-        self.x_scale.max = None
-        self.y_scale.min = None
-        self.y_scale.max = None
+        ids = np.asarray(data["star_id"]).astype(int)
         self.figure.axes[0].label = x_label
         self.figure.axes[1].label = quantity
 
