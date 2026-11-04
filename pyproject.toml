@@ -37,6 +37,7 @@ dependencies = [
   "bqplot-image-gl>=1.10",
   "reducer>=0.9.3",
   "ipyevents",
+  "ipyfilechooser",
   "bqplot",
 ]
 

@@ -21,8 +21,8 @@ COLUMNS = [
     "mag_error",
     "relative_flux",
     "relative_flux_error",
-    "mag_inst_cal",
-    "mag_inst_cal_error",
+    "mag_cal",
+    "mag_cal_error",
 ]
 N_POINTS = 6
 
@@ -90,7 +90,7 @@ def test_relative_flux_values_and_errors(table):
 
 def test_calibrated_values_and_errors(table):
     values, errors = quantity_values(table, "Calibrated magnitude")
-    np.testing.assert_allclose(values, table["mag_inst_cal"])
+    np.testing.assert_allclose(values, table["mag_cal"])
     np.testing.assert_allclose(errors, 0.03)
 
 
@@ -125,13 +125,13 @@ def test_all_quantities_available(table):
 
 
 def test_quantities_left_out_when_columns_missing():
-    t = make_table(drop=["mag_inst_cal", "relative_flux"])
+    t = make_table(drop=["mag_cal", "relative_flux"])
     available, missing = available_quantities(t)
     assert available == ["Instrumental magnitude"]
     assert missing == {
         "Relative flux": "relative_flux",
         "Differential magnitude": "relative_flux",
-        "Calibrated magnitude": "mag_inst_cal",
+        "Calibrated magnitude": "mag_cal",
     }
 
 
@@ -172,7 +172,8 @@ def test_star_options_without_source_list(table):
 
 def test_default_stars(table, source_list):
     options = star_options(table, source_list)
-    assert default_stars(options, source_list) == (1, 3)
+    # only the TESS target: VSX can mark dozens of stars in a field
+    assert default_stars(options, source_list) == (3,)
     # no marker of interest: first star
     other = Table({"star_id": [1, 2], "marker name": ["a", "b"]})
     assert default_stars(star_options(table, other), other) == (1,)
@@ -277,10 +278,10 @@ def test_missing_error_column_means_no_error_bars(source_list):
 
 
 def test_note_lists_missing_quantities(source_list):
-    viewer = LightCurveViewer(make_table(drop=["mag_inst_cal"]), source_list)
+    viewer = LightCurveViewer(make_table(drop=["mag_cal"]), source_list)
     assert "Calibrated magnitude" not in viewer.quantity.options
     assert (
-        "Calibrated magnitude not available: no mag_inst_cal column in the file"
+        "Calibrated magnitude not available: no mag_cal column in the file"
         in viewer.quantity_note.value
     )
 
@@ -397,3 +398,82 @@ def test_loads_from_files(tmp_path, table, source_list):
         viewer = LightCurveViewer(photometry_path, source_path)
     assert viewer.stars.value == (3,)
     assert viewer.stars.options[0][0] == "  2 APASS comparison"
+
+
+def test_redraw_closes_replaced_marks(table, source_list):
+    from ipywidgets import Widget
+
+    def ids(marks):
+        return {m.model_id for m in marks}
+
+    viewer = LightCurveViewer(table, source_list)
+    viewer.error_bars.value = True
+    first = list(viewer.figure.marks)
+    first_ids = ids(first)
+    registered = set(Widget._active_widgets)
+    # The offset slider fires continuously while dragging, so a redraw must
+    # not leave the marks it replaces registered.
+    for i in range(20):
+        viewer.offset.value = 0.1 * (i + 1)
+    assert all(m.comm is None for m in first)
+    assert not first_ids & set(Widget._active_widgets)
+    # Only the current marks are new since the baseline.
+    assert set(Widget._active_widgets) - registered == ids(viewer.figure.marks)
+    # Clearing the plot closes the last marks too.
+    last = list(viewer.figure.marks)
+    viewer.stars.value = ()
+    assert viewer.figure.marks == []
+    assert all(m.comm is None for m in last)
+
+
+def test_y_range_follows_selection(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    viewer.passband.value = "V"
+    viewer.error_bars.value = False
+
+    def extent(star):
+        rows = (table["passband"] == "V") & (table["star_id"] == star)
+        y = np.asarray(table["mag_inst"][rows], dtype=float)
+        return np.nanmin(y), np.nanmax(y)
+
+    for star in (2, 3):
+        viewer.stars.value = (star,)
+        low, high = extent(star)
+        pad = (high - low) * 0.05
+        assert viewer.y_scale.min == pytest.approx(low - pad)
+        assert viewer.y_scale.max == pytest.approx(high + pad)
+    # error bars widen the range
+    viewer.error_bars.value = True
+    low, high = extent(3)
+    assert viewer.y_scale.min < low - 0.01
+    assert viewer.y_scale.max > high + 0.01
+    # nothing plotted: back to automatic
+    viewer.stars.value = ()
+    assert viewer.y_scale.min is None and viewer.y_scale.max is None
+
+
+def test_x_range_follows_axis_choice(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    viewer.passband.value = "V"
+    viewer.stars.value = (2,)
+    rows = (table["passband"] == "V") & (table["star_id"] == 2)
+    bjd = np.asarray(table["bjd"][rows], dtype=float)
+    first = np.nanmin(np.asarray(table["bjd"], dtype=float))
+    expected = {
+        "BJD": bjd,
+        "Hours since first image": (bjd - first) * 24,
+        "Airmass": np.asarray(table["airmass"][rows], dtype=float),
+    }
+    # Visit the choices twice so each change starts from a different range.
+    for choice in list(expected) + list(expected):
+        viewer.x_axis.value = choice
+        low, high = np.nanmin(expected[choice]), np.nanmax(expected[choice])
+        pad = (high - low) * 0.05
+        assert viewer.x_scale.min == pytest.approx(low - pad)
+        assert viewer.x_scale.max == pytest.approx(high + pad)
+
+
+def test_note_is_faded(source_list):
+    viewer = LightCurveViewer(make_table(drop=["mag_cal"]), source_list)
+    assert "opacity: 0.6" in viewer.quantity_note.value
+    assert viewer.quantity_note.layout.max_width == "420px"
