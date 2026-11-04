@@ -397,3 +397,29 @@ def test_loads_from_files(tmp_path, table, source_list):
         viewer = LightCurveViewer(photometry_path, source_path)
     assert viewer.stars.value == (3,)
     assert viewer.stars.options[0][0] == "  2 APASS comparison"
+
+
+def test_redraw_closes_replaced_marks(table, source_list):
+    from ipywidgets import Widget
+
+    def ids(marks):
+        return {m.model_id for m in marks}
+
+    viewer = LightCurveViewer(table, source_list)
+    viewer.error_bars.value = True
+    first = list(viewer.figure.marks)
+    first_ids = ids(first)
+    registered = set(Widget._active_widgets)
+    # The offset slider fires continuously while dragging, so a redraw must
+    # not leave the marks it replaces registered.
+    for i in range(20):
+        viewer.offset.value = 0.1 * (i + 1)
+    assert all(m.comm is None for m in first)
+    assert not first_ids & set(Widget._active_widgets)
+    # Only the current marks are new since the baseline.
+    assert set(Widget._active_widgets) - registered == ids(viewer.figure.marks)
+    # Clearing the plot closes the last marks too.
+    last = list(viewer.figure.marks)
+    viewer.stars.value = ()
+    assert viewer.figure.marks == []
+    assert all(m.comm is None for m in last)

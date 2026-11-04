@@ -397,7 +397,7 @@ class LightCurveViewer(ipw.HBox):
         selected = list(self.stars.value)
         self.figure.title = self.title.value
         if quantity is None or choice is None:
-            self.figure.marks = []
+            self._install_marks([])
             return
 
         _, _, is_magnitude = QUANTITIES[quantity]
@@ -447,4 +447,15 @@ class LightCurveViewer(ipw.HBox):
                     display_legend=False,
                 )
                 marks.append(bars)
+        self._install_marks(marks)
+
+    def _install_marks(self, marks):
+        """Put ``marks`` on the figure and close the marks they replace.
+
+        Assigning ``figure.marks`` only detaches the old marks; ipywidgets
+        keeps them (and their data arrays) registered until they are closed.
+        """
+        old = list(self.figure.marks)
         self.figure.marks = marks
+        for mark in old:
+            mark.close()
