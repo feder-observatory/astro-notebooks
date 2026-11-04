@@ -147,7 +147,7 @@ def x_axis_values(table, choice, reference_bjd=None):
 
 def _marker_names(source_list):
     """Map star_id -> marker name for a source list, empty if no list."""
-    if source_list is None:
+    if source_list is None or "marker name" not in source_list.colnames:
         return {}
     return {
         int(star_id): str(name)
@@ -363,6 +363,8 @@ class LightCurveViewer(ipw.HBox):
             selected = default_stars(options, self.source_list)
         else:
             selected = tuple(s for s in sorted(old) if s in present)
+            if not selected:
+                selected = default_stars(options, self.source_list)
         self.stars.options = options
         self.stars.value = selected
 
@@ -413,11 +415,12 @@ class LightCurveViewer(ipw.HBox):
         for i, star_id in enumerate(selected):
             rows = ids == star_id
             x = x_all[rows]
-            y = y_all[rows] + i * self.offset.value
+            # The y axis of a magnitude plot is reversed, so subtract to
+            # move each successive star up on the screen.
+            shift = i * self.offset.value
+            y = y_all[rows] - shift if is_magnitude else y_all[rows] + shift
             err = err_all[rows] if err_all is not None else None
             good = np.isfinite(x) & np.isfinite(y)
-            if show_errors:
-                good &= np.isfinite(err)
             x, y = x[good], y[good]
             label = next(lab for lab, sid in self.stars.options if sid == star_id)
             color = COLORS[i % len(COLORS)]
@@ -432,10 +435,13 @@ class LightCurveViewer(ipw.HBox):
             )
             marks.append(scatter)
             if show_errors:
+                # A point with no error is still plotted, just without a bar.
                 e = err[good]
+                has_error = np.isfinite(e)
+                xb, yb, e = x[has_error], y[has_error], e[has_error]
                 bars = Lines(
-                    x=np.column_stack([x, x]),
-                    y=np.column_stack([y - e, y + e]),
+                    x=np.column_stack([xb, xb]),
+                    y=np.column_stack([yb - e, yb + e]),
                     scales={"x": self.x_scale, "y": self.y_scale},
                     colors=[color],
                     display_legend=False,

@@ -66,7 +66,7 @@ def source_list():
     return Table(
         {
             "star_id": [1, 2, 3],
-            "marker name": ["VSX", "APASS comparison", "APASS comparison"],
+            "marker name": ["VSX", "APASS comparison", "TESS Targets"],
         }
     )
 
@@ -159,7 +159,7 @@ def test_star_options_labels(table, source_list):
     assert options == [
         ("  1 VSX", 1),
         ("  2 APASS comparison", 2),
-        ("  3 APASS comparison", 3),
+        ("  3 TESS Targets", 3),
         ("  4", 4),
     ]
 
@@ -171,7 +171,7 @@ def test_star_options_without_source_list(table):
 
 def test_default_stars(table, source_list):
     options = star_options(table, source_list)
-    assert default_stars(options, source_list) == (1,)
+    assert default_stars(options, source_list) == (1, 3)
     # no marker of interest: first star
     other = Table({"star_id": [1, 2], "marker name": ["a", "b"]})
     assert default_stars(star_options(table, other), other) == (1,)
@@ -181,15 +181,17 @@ def test_default_stars(table, source_list):
 def test_viewer_defaults(table, source_list):
     viewer = LightCurveViewer(table, source_list)
     assert viewer.passband.value == "R"  # first of sorted
-    assert viewer.stars.value == (2,)
+    assert viewer.stars.value == (3,)
     viewer.passband.value = "V"
     assert [s for _, s in viewer.stars.options] == [1, 2, 3]
 
 
 def test_viewer_default_selection_is_marked_star(table, source_list):
     viewer = LightCurveViewer(table, source_list)
-    # R has no VSX or TESS star in its list, so it falls back to the first.
-    assert viewer.stars.value == (2,)
+    # R opens with stars 2, 3, 4; only star 3 is marked, and star 2 (the
+    # first option) must not be chosen instead.
+    assert viewer.stars.options[0][1] == 2
+    assert viewer.stars.value == (3,)
     assert n_marks(viewer, "Scatter") == 1
 
 
@@ -202,7 +204,7 @@ def test_scatter_per_star_with_labels(table, source_list):
     assert [s.labels[0] for s in scatters] == [
         "  1 VSX",
         "  2 APASS comparison",
-        "  3 APASS comparison",
+        "  3 TESS Targets",
     ]
     assert len({s.colors[0] for s in scatters}) == 3
     assert all(s.display_legend for s in scatters)
@@ -223,20 +225,31 @@ def test_passband_change_with_no_overlap(table, source_list):
     viewer.passband.value = "V"
     viewer.stars.value = (1,)
     viewer.passband.value = "R"
-    assert viewer.stars.value == ()
-    assert viewer.figure.marks == []
+    # none of the old selection is in R, so the default is chosen
+    assert viewer.stars.value == (3,)
+    assert n_marks(viewer, "Scatter") == 1
 
 
 def test_offset_applied_per_star(table, source_list):
     viewer = LightCurveViewer(table, source_list)
     viewer.passband.value = "V"
-    viewer.quantity.value = "Calibrated magnitude"
-    viewer.stars.value = (1, 2, 3)
-    before = [m.y.copy() for m in viewer.figure.marks if type(m).__name__ == "Scatter"]
-    viewer.offset.value = 0.5
-    after = [m.y for m in viewer.figure.marks if type(m).__name__ == "Scatter"]
-    for i, (b, a) in enumerate(zip(before, after)):
-        np.testing.assert_allclose(a - b, 0.5 * i)
+    viewer.stars.value = (2, 3)
+    # (quantity, sign): magnitudes are plotted with a reversed y axis, so
+    # moving up on the screen means smaller values.
+    for quantity, sign in (
+        ("Calibrated magnitude", -1),
+        ("Instrumental magnitude", -1),
+        ("Relative flux", 1),
+    ):
+        viewer.offset.value = 0
+        viewer.quantity.value = quantity
+        before = [
+            m.y.copy() for m in viewer.figure.marks if type(m).__name__ == "Scatter"
+        ]
+        viewer.offset.value = 0.5
+        after = [m.y for m in viewer.figure.marks if type(m).__name__ == "Scatter"]
+        for i, (b, a) in enumerate(zip(before, after)):
+            np.testing.assert_allclose(a - b, sign * 0.5 * i)
 
 
 def test_error_bars_follow_checkbox(table, source_list):
@@ -281,6 +294,32 @@ def test_nan_points_dropped(table, source_list):
     assert np.all(np.isfinite(scatter.y))
     viewer.quantity.value = "Relative flux"
     assert len(viewer.figure.marks[0].x) == N_POINTS - 1
+
+
+def test_nan_error_keeps_point_but_not_bar():
+    t = QTable(
+        {
+            "star_id": [1] * 6,
+            "passband": ["V"] * 6,
+            "bjd": 2459910.0 + np.arange(6) * 0.01,
+            "mag_inst": [15.0, 15.1, np.nan, np.nan, 15.2, 15.3],
+            "mag_error": [0.01, np.nan, 0.01, 0.01, np.nan, 0.01],
+        }
+    )
+    viewer = LightCurveViewer(t)
+    scatter = [m for m in viewer.figure.marks if type(m).__name__ == "Scatter"][0]
+    assert len(scatter.x) == 4
+    assert n_marks(viewer, "Lines") == 1
+    lines = [m for m in viewer.figure.marks if type(m).__name__ == "Lines"][0]
+    assert lines.x.shape == (2, 2)
+    viewer.error_bars.value = False
+    assert n_marks(viewer, "Lines") == 0
+    scatter = [m for m in viewer.figure.marks if type(m).__name__ == "Scatter"][0]
+    assert len(scatter.x) == 4
+
+
+def test_source_list_without_marker_name_column(table):
+    assert star_options(table, Table({"star_id": [1, 2]}))[0] == ("  1", 1)
 
 
 def test_empty_selection_gives_no_marks(table, source_list):
@@ -336,5 +375,5 @@ def test_loads_from_files(tmp_path, table, source_list):
 
     with mock.patch("stellarphot.PhotometryData.read", QTable.read):
         viewer = LightCurveViewer(photometry_path, source_path)
-    assert viewer.stars.value == (2,)
+    assert viewer.stars.value == (3,)
     assert viewer.stars.options[0][0] == "  2 APASS comparison"
