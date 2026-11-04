@@ -5,8 +5,12 @@ from bqplot import Axis, Figure, LinearScale, Lines, Scatter
 from bqplot.colorschemes import CATEGORY10
 
 # Marker names (in the source list) of the stars a student most likely
-# wants to see first.
-DEFAULT_MARKER_NAMES = ("TESS Targets", "VSX")
+# wants to see first. VSX is deliberately not here: a field can have dozens
+# of VSX stars, and starting with all of them plotted is a mess.
+DEFAULT_MARKER_NAMES = ("TESS Targets",)
+
+# Room beyond the data on each axis, as a fraction of the range of the data.
+AXIS_PADDING = 0.05
 
 # bqplot's own colour cycle, so each star gets a colour of its own.
 COLORS = list(CATEGORY10)
@@ -20,7 +24,7 @@ QUANTITIES = {
     "Instrumental magnitude": ("mag_inst", "mag_error", True),
     "Relative flux": ("relative_flux", "relative_flux_error", False),
     "Differential magnitude": (None, "relative_flux_error", True),
-    "Calibrated magnitude": ("mag_inst_cal", "mag_inst_cal_error", True),
+    "Calibrated magnitude": ("mag_cal", "mag_cal_error", True),
 }
 
 # Column that has to be present for each quantity to be shown.
@@ -259,7 +263,8 @@ class LightCurveViewer(ipw.HBox):
 
         quantities, missing = available_quantities(self.table)
         self.quantity = ipw.Dropdown(options=quantities, description="Show")
-        self.quantity_note = ipw.HTML()
+        # Faded so that it does not compete with the controls.
+        self.quantity_note = ipw.HTML(layout=ipw.Layout(max_width="420px"))
 
         x_choices = [
             c
@@ -354,7 +359,9 @@ class LightCurveViewer(ipw.HBox):
                     f"{quantity}: no {error_col} column in the file, "
                     "so error bars are not available"
                 )
-        self.quantity_note.value = "<br>".join(notes)
+        self.quantity_note.value = (
+            '<span style="opacity: 0.6; font-size: 85%">' + "<br>".join(notes) + "</span>"
+        )
 
     def _update_star_options(self, default=False):
         """Refresh the star list for the passband, keeping what is still there."""
@@ -412,6 +419,8 @@ class LightCurveViewer(ipw.HBox):
 
         show_errors = self.error_bars.value and err_all is not None
         marks = []
+        x_values = []
+        y_low, y_high = [], []
         for i, star_id in enumerate(selected):
             rows = ids == star_id
             x = x_all[rows]
@@ -434,6 +443,9 @@ class LightCurveViewer(ipw.HBox):
                 default_size=24,
             )
             marks.append(scatter)
+            x_values.append(x)
+            y_low.append(y)
+            y_high.append(y)
             if show_errors:
                 # A point with no error is still plotted, just without a bar.
                 e = err[good]
@@ -447,7 +459,31 @@ class LightCurveViewer(ipw.HBox):
                     display_legend=False,
                 )
                 marks.append(bars)
+                y_low.append(yb - e)
+                y_high.append(yb + e)
         self._install_marks(marks)
+        self._set_range(self.x_scale, x_values)
+        self._set_range(self.y_scale, y_low + y_high)
+
+    @staticmethod
+    def _set_range(scale, arrays):
+        """
+        Fit ``scale`` to the plotted data in ``arrays``.
+
+        Setting the limits explicitly, rather than leaving the scale to fit
+        itself, makes sure each axis follows the current selection instead
+        of hanging on to the range of whatever was plotted before.
+        """
+        values = np.concatenate([np.ravel(v) for v in arrays] or [[]])
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            scale.min = None
+            scale.max = None
+            return
+        low, high = values.min(), values.max()
+        pad = (high - low) * AXIS_PADDING or 0.05
+        scale.min = float(low - pad)
+        scale.max = float(high + pad)
 
     def _install_marks(self, marks):
         """Put ``marks`` on the figure and close the marks they replace.
