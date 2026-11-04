@@ -31,3 +31,11 @@
   cwd: not_used
   type: notebook
   catalog: Astro tools
+
+- title: Plot light curves
+  description: Plot light curves of the stars in your photometry file
+  source: ../astro_notebooks/light-curve-template.ipynb
+  icon: ../astro-notebooks/stellarphot-logo.svg
+  cwd: not_used
+  type: notebook
+  catalog: Astro tools
