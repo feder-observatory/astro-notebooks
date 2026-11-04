@@ -181,7 +181,7 @@ def test_default_stars(table, source_list):
 def test_viewer_defaults(table, source_list):
     viewer = LightCurveViewer(table, source_list)
     assert viewer.passband.value == "R"  # first of sorted
-    assert viewer.stars.value == (2,) or viewer.stars.value == ()
+    assert viewer.stars.value == (2,)
     viewer.passband.value = "V"
     assert [s for _, s in viewer.stars.options] == [1, 2, 3]
 
