@@ -1,7 +1,9 @@
+import re
 import warnings
 
 import ipywidgets as ipw
 import numpy as np
+import astropy.units as u
 from astropy.table import Table
 from astropy.time import Time
 from bqplot import Axis, Figure, LinearScale, Lines, PanZoom, Scatter
@@ -18,6 +20,12 @@ AXIS_PADDING = 0.05
 # bqplot's own colour cycle, so each star gets a colour of its own.
 COLORS = list(CATEGORY10)
 
+# Marker shapes, one per night, when more than one night is plotted at once.
+MARKERS = ("circle", "square", "diamond", "triangle-up", "triangle-down", "cross", "plus")
+
+# File name of the PNG when the plot has no title.
+DEFAULT_PNG_NAME = "light-curve"
+
 X_AXIS_CHOICES = ("BJD", "Hours since first image", "Airmass")
 
 # Value of the night dropdown that means every night in the file.
@@ -26,6 +34,11 @@ ALL_NIGHTS = "all"
 # Images further apart than this, in days, are on different nights when the
 # table has no night column to say so.
 NIGHT_GAP = 0.5
+
+# Longitude, in degrees east, that nights are told apart by when the table
+# does not say where it was observed from. Greenwich: a night key is then
+# the UTC date of the noon before the observation.
+DEFAULT_LONGITUDE = 0.0
 
 # label -> (value column or None, error column, is a magnitude)
 # The differential magnitude has no column of its own; it is computed from
@@ -206,7 +219,43 @@ def x_axis_values(table, choice, reference_bjd=None):
     raise ValueError(f"Unknown x axis choice: {choice!r}")
 
 
-def night_keys(table):
+def observatory_longitude(table):
+    """
+    The longitude the table was observed from, if it says.
+
+    Parameters
+    ----------
+    table : `astropy.table.Table`
+        Photometry table. A `stellarphot.PhotometryData` carries the
+        observatory as a table attribute; a plain table read from a
+        stellarphot file has it, serialised, in
+        ``meta["__attributes__"]["observatory"]``.
+
+    Returns
+    -------
+    float or None
+        Longitude in degrees, east positive, between -180 and 180; None if
+        the table does not say.
+    """
+    observatory = getattr(table, "observatory", None)
+    if observatory is None:
+        observatory = table.meta.get("__attributes__", {}).get("observatory")
+    if isinstance(observatory, dict):
+        longitude = observatory.get("longitude")
+    else:
+        longitude = getattr(observatory, "longitude", None)
+    if longitude is None:
+        return None
+    try:
+        longitude = float(u.Quantity(longitude, u.deg).to_value(u.deg))
+    except (TypeError, ValueError, u.UnitConversionError):
+        return None
+    if not np.isfinite(longitude):
+        return None
+    return (longitude + 180) % 360 - 180
+
+
+def night_keys(table, longitude=None):
     """
     Work out which night each row of a table belongs to.
 
@@ -216,18 +265,23 @@ def night_keys(table):
         Photometry table. The ``night`` column stellarphot writes, the MJD of
         local noon before the evening of the observation, is used if there is
         one. Otherwise images are grouped by gaps of more than `NIGHT_GAP`
-        days in ``bjd``, and each group is keyed by the MJD of its first
-        image.
+        days in ``bjd``, and each group is keyed the way stellarphot does it:
+        the MJD of the local noon before its first image.
+    longitude : float, optional
+        Longitude of the observatory in degrees east, used to find local
+        noon when there is no ``night`` column. The longitude in the table,
+        if there is one (see `observatory_longitude`), or
+        `DEFAULT_LONGITUDE` if not given.
 
     Returns
     -------
     numpy.ndarray
         Integer key of the night of each row; -1 for a row whose night
-        cannot be told.
+        cannot be told. Different nights always have different keys.
     """
     if "night" in table.colnames:
-        night = np.ma.asarray(table["night"])
-        return np.ma.filled(night, -1).astype(int)
+        night = _as_float_array(table["night"])
+        return np.where(np.isfinite(night), night, -1).astype(int)
     keys = np.full(len(table), -1, dtype=int)
     if "bjd" not in table.colnames:
         return keys
@@ -235,11 +289,23 @@ def night_keys(table):
     finite = np.isfinite(bjd)
     if not finite.any():
         return keys
+    if longitude is None:
+        longitude = observatory_longitude(table)
+    if longitude is None:
+        longitude = DEFAULT_LONGITUDE
     order = np.argsort(bjd[finite], kind="stable")
     sorted_bjd = bjd[finite][order]
     starts = np.concatenate([[True], np.diff(sorted_bjd) > NIGHT_GAP])
     group = np.cumsum(starts) - 1
-    group_key = np.floor(sorted_bjd[starts] - 2400000.5).astype(int)
+    # Local time is UTC plus a whole number of hours, as in stellarphot, so
+    # that a file with a night column and one without label a night alike.
+    hours_east = int(longitude / 15)
+    local_mjd = sorted_bjd[starts] - 2400000.5 + hours_east / 24
+    group_key = np.floor(local_mjd - 0.5).astype(int)
+    # Two nights could only share a key if one had a lone image within a
+    # few hours of noon; still, each night gets a key of its own.
+    for i in range(1, group_key.size):
+        group_key[i] = max(group_key[i], group_key[i - 1] + 1)
     sorted_keys = np.empty(sorted_bjd.size, dtype=int)
     sorted_keys[order] = group_key[group]
     keys[finite] = sorted_keys
@@ -247,8 +313,34 @@ def night_keys(table):
 
 
 def night_label(key):
-    """The calendar date, as text, of a night key (an MJD)."""
+    """
+    The date of a night, as text, from its key.
+
+    The key is the MJD of local noon before the night, so the label is the
+    date of the evening the night began.
+    """
     return Time(int(key), format="mjd", scale="utc").to_value("iso", subfmt="date")
+
+
+def png_file_name(title):
+    """
+    The name of the PNG file to save a plot as.
+
+    Parameters
+    ----------
+    title : str
+        Title of the plot.
+
+    Returns
+    -------
+    str
+        The title with characters that cannot be in a file name replaced,
+        and ``.png`` on the end; or ``light-curve.png`` if the title is
+        empty.
+    """
+    name = re.sub(r'[\\/:*?"<>|]+', "-", title)
+    name = " ".join(name.split()).strip(" .-")
+    return (name or DEFAULT_PNG_NAME) + ".png"
 
 
 def night_options(keys):
@@ -364,7 +456,7 @@ class LightCurveViewer(ipw.HBox):
     reset_view : `ipywidgets.Button`
         Fits the axes to the plotted points again.
     save_png : `ipywidgets.Button`
-        Downloads the plot as a PNG image.
+        Downloads the plot as a PNG image, named after the title.
     """
 
     def __init__(self, photometry, source_list=None, **kwargs):
@@ -484,7 +576,9 @@ class LightCurveViewer(ipw.HBox):
         self.title.observe(self._on_title, names="value")
         self.pan_zoom.observe(self._on_pan_zoom, names="value")
         self.reset_view.on_click(lambda button: self.fit_axes())
-        self.save_png.on_click(lambda button: self.figure.save_png("light-curve.png"))
+        self.save_png.on_click(
+            lambda button: self.figure.save_png(png_file_name(self.title.value))
+        )
         self._redraw()
 
     @staticmethod
@@ -617,6 +711,14 @@ class LightCurveViewer(ipw.HBox):
         self.figure.axes[0].label = x_label
         self.figure.axes[1].label = quantity
 
+        # With several nights on the plot, each gets a marker of its own.
+        night_marker = {}
+        if night == ALL_NIGHTS:
+            nights = [key for _, key in self.night.options if key != ALL_NIGHTS]
+            if len(nights) > 1:
+                night_marker = {key: MARKERS[i % len(MARKERS)] for i, key in enumerate(nights)}
+        keys = self._night_keys[in_band]
+
         show_errors = self.error_bars.value and err_all is not None
         marks = []
         for i, star_id in enumerate(selected):
@@ -629,18 +731,29 @@ class LightCurveViewer(ipw.HBox):
             err = err_all[rows] if err_all is not None else None
             good = np.isfinite(x) & np.isfinite(y)
             x, y = x[good], y[good]
+            star_keys = keys[rows][good]
             label = next(lab for lab, sid in self.stars.options if sid == star_id)
             color = COLORS[i % len(COLORS)]
-            scatter = Scatter(
-                x=x,
-                y=y,
-                scales={"x": self.x_scale, "y": self.y_scale},
-                colors=[color],
-                labels=[label],
-                display_legend=True,
-                default_size=24,
-            )
-            marks.append(scatter)
+            if night_marker:
+                groups = [
+                    (star_keys == key, f"{label}, {night_label(key)}", marker)
+                    for key, marker in night_marker.items()
+                    if (star_keys == key).any()
+                ]
+            else:
+                groups = [(np.ones(x.size, dtype=bool), label, MARKERS[0])]
+            for in_group, group_label, marker in groups:
+                scatter = Scatter(
+                    x=x[in_group],
+                    y=y[in_group],
+                    scales={"x": self.x_scale, "y": self.y_scale},
+                    colors=[color],
+                    labels=[group_label],
+                    marker=marker,
+                    display_legend=True,
+                    default_size=24,
+                )
+                marks.append(scatter)
             if show_errors:
                 # A point with no error is still plotted, just without a bar.
                 e = err[good]
