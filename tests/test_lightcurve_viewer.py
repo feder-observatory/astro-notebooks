@@ -1,12 +1,20 @@
+import astropy.units as u
 import numpy as np
 import pytest
 from astropy.time import Time
 from astropy.table import MaskedColumn, QTable, Table
 
 from astro_notebooks.lightcurve_viewer import (
+    ALL_NIGHTS,
+    MARKERS,
     LightCurveViewer,
     available_quantities,
     default_stars,
+    night_keys,
+    night_label,
+    night_options,
+    observatory_longitude,
+    png_file_name,
     quantity_values,
     star_options,
     x_axis_values,
@@ -82,10 +90,50 @@ def test_instrumental_values_and_errors(table):
     np.testing.assert_allclose(errors, 0.01)
 
 
-def test_relative_flux_values_and_errors(table):
+def test_relative_flux_scaled_to_median_one_per_star(table):
     values, errors = quantity_values(table, "Relative flux")
-    np.testing.assert_allclose(values, table["relative_flux"], equal_nan=True)
-    np.testing.assert_allclose(errors, 0.02)
+    flux = np.asarray(table["relative_flux"], dtype=float)
+    raw_errors = np.asarray(table["relative_flux_error"], dtype=float)
+    for star in (1, 2, 3, 4):
+        rows = np.asarray(table["star_id"]) == star
+        median = np.nanmedian(flux[rows])
+        assert np.nanmedian(values[rows]) == pytest.approx(1.0)
+        np.testing.assert_allclose(values[rows], flux[rows] / median, equal_nan=True)
+        np.testing.assert_allclose(errors[rows], raw_errors[rows] / median)
+    # the NaN point stays NaN
+    assert np.isnan(values[1])
+
+
+def test_relative_flux_scaling_is_per_star():
+    t = QTable(
+        {
+            "star_id": [1, 1, 1, 2, 2, 2],
+            "relative_flux": [2.0, 4.0, 8.0, 0.1, 0.2, 0.4],
+            "relative_flux_error": [0.2, 0.2, 0.2, 0.01, 0.01, 0.01],
+        }
+    )
+    values, errors = quantity_values(t, "Relative flux")
+    np.testing.assert_allclose(values, [0.5, 1, 2, 0.5, 1, 2])
+    np.testing.assert_allclose(errors, [0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    # differential magnitude is zero at the median of each star
+    mags, mag_errors = quantity_values(t, "Differential magnitude")
+    np.testing.assert_allclose(mags, [0.75257499, 0, -0.75257499] * 2, atol=1e-6)
+    # 2.5 / ln(10) * (error / flux) does not depend on the scaling
+    np.testing.assert_allclose(
+        mag_errors, 2.5 / np.log(10) * 0.1 / np.array([1, 2, 4] * 2)
+    )
+
+
+def test_relative_flux_scaling_skips_bad_medians():
+    t = QTable(
+        {
+            "star_id": [1, 1, 2, 2],
+            "relative_flux": [np.nan, np.nan, -1.0, -3.0],
+        }
+    )
+    values, errors = quantity_values(t, "Relative flux")
+    np.testing.assert_allclose(values, [np.nan, np.nan, -1.0, -3.0])
+    assert errors is None
 
 
 def test_calibrated_values_and_errors(table):
@@ -339,7 +387,8 @@ def test_masked_time_and_column_give_nan():
     x, _ = x_axis_values(t, "BJD")
     np.testing.assert_allclose(x, [2459910.0, np.nan, 2459910.2])
     values, errors = quantity_values(t, "Relative flux")
-    np.testing.assert_allclose(values, [1.0, np.nan, 3.0])
+    # no star_id, so the whole table is one star with median 2
+    np.testing.assert_allclose(values, [0.5, np.nan, 1.5])
     assert errors is None
 
 
@@ -381,7 +430,8 @@ def test_figure_is_kept(table, source_list):
     viewer.quantity.value = "Relative flux"
     viewer.passband.value = "V"
     assert viewer.figure is figure
-    assert viewer.children[0] is figure
+    assert viewer.children[0] is viewer.plot
+    assert viewer.plot.children[0] is figure
 
 
 def test_loads_from_files(tmp_path, table, source_list):
@@ -477,3 +527,300 @@ def test_note_is_faded(source_list):
     viewer = LightCurveViewer(make_table(drop=["mag_cal"]), source_list)
     assert "opacity: 0.6" in viewer.quantity_note.value
     assert viewer.quantity_note.layout.max_width == "420px"
+
+
+def scatters(viewer):
+    return [m for m in viewer.figure.marks if type(m).__name__ == "Scatter"]
+
+
+def make_two_night_table(with_night_column=True):
+    rows = []
+    # Each night starts at 21:36 UTC, so from Greenwich to the Americas the
+    # noon before it is on the UTC date of the start, as the night column says.
+    for night, start in ((60000, 2460001.4), (60003, 2460004.4)):
+        for star in (1, 2):
+            for k in range(N_POINTS):
+                bjd = start + k * 0.01
+                rows.append(
+                    (star, "V", bjd, 1.0 + k * 0.01, 15.0 + 0.1 * k, 0.01, night)
+                )
+    names = ["star_id", "passband", "bjd", "airmass", "mag_inst", "mag_error", "night"]
+    t = QTable(rows=rows, names=names)
+    if not with_night_column:
+        t.remove_column("night")
+    return t
+
+
+def test_night_keys_from_night_column():
+    t = make_two_night_table()
+    keys = night_keys(t)
+    np.testing.assert_array_equal(keys, t["night"])
+    assert night_options(keys) == [("2023-02-25", 60000), ("2023-02-28", 60003)]
+    assert night_label(60000) == "2023-02-25"
+
+
+def test_night_keys_from_gaps_in_bjd():
+    t = make_two_night_table(with_night_column=False)
+    keys = night_keys(t)
+    # MJD of the (Greenwich) noon before the first image of each night
+    expected = np.where(np.asarray(t["bjd"]) < 2460002, 60000, 60003)
+    np.testing.assert_array_equal(keys, expected)
+    assert [k for _, k in night_options(keys)] == [60000, 60003]
+    # one night, however it straddles a day boundary, is one night
+    one = QTable({"bjd": 2460000.9 + np.arange(5) * 0.1})
+    assert len(night_options(night_keys(one))) == 1
+    # a row with no time has no night
+    t["bjd"][0] = np.nan
+    assert night_keys(t)[0] == -1
+    assert -1 not in [k for _, k in night_options(night_keys(t))]
+
+
+def test_night_keys_match_stellarphot_night_column():
+    # stellarphot labels a night by the local noon before it; the fallback
+    # must agree, so files with and without the column read the same.
+    from astropy.time import Time
+
+    t = make_two_night_table(with_night_column=False)
+    t["bjd"] = Time(t["bjd"], format="jd", scale="tdb")
+    # from the Feder Observatory (UTC-6 whole hours) 21:36 UTC is 15:36 of
+    # the same date, so the same nights as at Greenwich
+    np.testing.assert_array_equal(night_keys(t, longitude=-96.45), night_keys(t))
+    # a session at 14:24 UTC is 08:24 at Feder: the end of the night before
+    t["bjd"] = 2460001.1 + np.arange(len(t)) * 0.001
+    assert set(night_keys(t)) == {60000}
+    assert set(night_keys(t, longitude=-96.45)) == {59999}
+    # a session at 11:00 UTC is 13:00 two hours east: the next night
+    t["bjd"] = 2460001.958 + np.arange(len(t)) * 0.001
+    assert set(night_keys(t)) == {60000}
+    assert set(night_keys(t, longitude=-96.45)) == {60000}
+    assert set(night_keys(t, longitude=30)) == {60001}
+
+
+def test_night_keys_from_gaps_are_unique():
+    # two sessions on the same UTC date: one just after midnight, one in the
+    # evening. Each must be its own night.
+    t = QTable(
+        {
+            "bjd": np.concatenate(
+                [2460000.55 + np.arange(5) * 0.01, 2460001.3 + np.arange(5) * 0.01]
+            )
+        }
+    )
+    keys = night_keys(t)
+    assert len(night_options(keys)) == 2
+    assert keys[0] != keys[-1]
+    # a single image at local noon, then a session the same evening
+    t = QTable({"bjd": [2460000.5, 2460001.2, 2460001.21, 2460004.2]})
+    keys = night_keys(t)
+    assert len(set(keys)) == 3
+    assert list(keys) == sorted(keys)
+    # row order does not matter
+    keys = night_keys(QTable({"bjd": [2460004.2, 2460001.21, 2460000.5, 2460001.2]}))
+    assert keys[1] == keys[3]
+    assert keys[0] > keys[1] > keys[2]
+
+
+def test_night_keys_use_longitude_from_table():
+    t = make_two_night_table(with_night_column=False)
+    # 14:24 UTC: the night before at Feder, the night after at Greenwich
+    t["bjd"] = 2460001.1 + np.arange(len(t)) * 0.001
+    assert observatory_longitude(t) is None
+    assert set(night_keys(t)) == {60000}
+
+    # as stellarphot's PhotometryData carries it
+    class Observatory:
+        longitude = -96.45 * u.deg
+
+    t.observatory = Observatory()
+    assert observatory_longitude(t) == pytest.approx(-96.45)
+    assert set(night_keys(t)) == {59999}
+    # as a plain table read from a stellarphot file carries it
+    del t.observatory
+    t.meta["__attributes__"] = {"observatory": {"longitude": "263.55 deg"}}
+    assert observatory_longitude(t) == pytest.approx(-96.45)
+    assert set(night_keys(t)) == {59999}
+    t.meta["__attributes__"] = {"observatory": {"longitude": "what"}}
+    assert observatory_longitude(t) is None
+    assert set(night_keys(t)) == {60000}
+
+
+def test_night_column_with_nan():
+    t = make_two_night_table()
+    t["night"] = t["night"].astype(float)
+    t["night"][0] = np.nan
+    keys = night_keys(t)
+    assert keys[0] == -1
+    assert night_options(keys) == [("2023-02-25", 60000), ("2023-02-28", 60003)]
+    t["night"] = MaskedColumn(t["night"], mask=[True] + [False] * (len(t) - 1))
+    assert night_keys(t)[0] == -1
+
+
+def test_night_keys_without_times():
+    assert list(night_keys(QTable({"star_id": [1, 2]}))) == [-1, -1]
+
+
+def test_night_dropdown_hidden_for_one_night(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    assert viewer.night not in viewer.controls.children
+    assert viewer.night.value == ALL_NIGHTS
+
+
+@pytest.mark.parametrize("with_night_column", [True, False])
+def test_night_dropdown_picks_a_night(with_night_column):
+    t = make_two_night_table(with_night_column)
+    viewer = LightCurveViewer(t)
+    viewer.error_bars.value = False
+    assert viewer.night in viewer.controls.children
+    assert viewer.night.options == (
+        ("All nights", ALL_NIGHTS),
+        ("2023-02-25", 60000),
+        ("2023-02-28", 60003),
+    )
+    assert viewer.night.value == ALL_NIGHTS
+    assert sum(len(s.x) for s in scatters(viewer)) == 2 * N_POINTS
+
+    viewer.night.value = 60003
+    assert len(scatters(viewer)) == 1
+    scatter = viewer.figure.marks[0]
+    assert len(scatter.x) == N_POINTS
+    assert scatter.x.min() == pytest.approx(2460004.4)
+    # the x axis follows the night
+    assert viewer.x_scale.min == pytest.approx(2460004.4 - 0.05 * 0.05)
+    assert viewer.x_scale.max == pytest.approx(2460004.45 + 0.05 * 0.05)
+
+    # hours count from the first image of the night that is shown
+    viewer.x_axis.value = "Hours since first image"
+    assert viewer.figure.marks[0].x.min() == pytest.approx(0)
+    viewer.night.value = ALL_NIGHTS
+    assert max(s.x.max() for s in scatters(viewer)) == pytest.approx(3.05 * 24)
+
+
+def test_each_night_gets_its_own_marker():
+    t = make_two_night_table()
+    viewer = LightCurveViewer(t)
+    viewer.error_bars.value = False
+    viewer.stars.value = (1, 2)
+    marks = scatters(viewer)
+    assert [m.labels[0] for m in marks] == [
+        "  1, 2023-02-25",
+        "  1, 2023-02-28",
+        "  2, 2023-02-25",
+        "  2, 2023-02-28",
+    ]
+    assert [m.marker for m in marks] == [MARKERS[0], MARKERS[1]] * 2
+    # a star keeps its colour across nights
+    assert marks[0].colors == marks[1].colors
+    assert marks[0].colors != marks[2].colors
+    assert all(m.display_legend for m in marks)
+    assert all(len(m.x) == N_POINTS for m in marks)
+    # one error-bar mark per star, not per night
+    viewer.error_bars.value = True
+    assert n_marks(viewer, "Lines") == 2
+    assert n_marks(viewer, "Scatter") == 4
+    # a single night: plain labels and the first marker
+    viewer.night.value = 60003
+    marks = scatters(viewer)
+    assert [m.labels[0] for m in marks] == ["  1", "  2"]
+    assert all(m.marker == MARKERS[0] for m in marks)
+    # a star seen on one night only has one mark
+    viewer.night.value = ALL_NIGHTS
+    t = make_two_night_table()
+    t = t[~((t["star_id"] == 2) & (t["night"] == 60003))]
+    viewer = LightCurveViewer(t)
+    viewer.stars.value = (1, 2)
+    assert [m.labels[0] for m in scatters(viewer)] == [
+        "  1, 2023-02-25",
+        "  1, 2023-02-28",
+        "  2, 2023-02-25",
+    ]
+
+
+def test_one_night_file_uses_plain_markers(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    viewer.passband.value = "V"
+    viewer.stars.value = (1, 2)
+    marks = scatters(viewer)
+    assert [m.labels[0] for m in marks] == ["  1 VSX", "  2 APASS comparison"]
+    assert all(m.marker == "circle" for m in marks)
+
+
+def test_night_options_follow_passband():
+    t = make_two_night_table()
+    # second night only in R
+    t["passband"][t["night"] == 60003] = "R"
+    viewer = LightCurveViewer(t)
+    assert viewer.passband.value == "R"
+    assert [k for _, k in viewer.night.options] == [ALL_NIGHTS, 60003]
+    viewer.night.value = 60003
+    viewer.passband.value = "V"
+    assert [k for _, k in viewer.night.options] == [ALL_NIGHTS, 60000]
+    assert viewer.night.value == ALL_NIGHTS
+    assert len(viewer.figure.marks[0].x) == N_POINTS
+
+
+def test_relative_flux_scaled_over_all_nights():
+    t = make_two_night_table()
+    t["relative_flux"] = np.where(t["night"] == 60000, 1.0, 3.0)
+    viewer = LightCurveViewer(t)
+    viewer.quantity.value = "Relative flux"
+    viewer.night.value = 60003
+    # the median over both nights is 2, so this night sits at 1.5, not 1
+    np.testing.assert_allclose(viewer.figure.marks[0].y, 1.5)
+
+
+def test_reset_view_refits_current_points(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    x_min, x_max = viewer.x_scale.min, viewer.x_scale.max
+    y_min, y_max = viewer.y_scale.min, viewer.y_scale.max
+    # zoom in, as the pan/zoom interaction would
+    viewer.x_scale.min, viewer.x_scale.max = x_min + 0.02, x_max - 0.02
+    viewer.y_scale.min, viewer.y_scale.max = y_min + 0.1, y_max - 0.1
+    viewer.reset_view.click()
+    assert (viewer.x_scale.min, viewer.x_scale.max) == (x_min, x_max)
+    assert (viewer.y_scale.min, viewer.y_scale.max) == (y_min, y_max)
+    # zoom, then plot something else: the reset fits the new points
+    viewer.x_scale.min, viewer.x_scale.max = x_min + 0.02, x_max - 0.02
+    viewer.quantity.value = "Relative flux"
+    viewer.y_scale.min, viewer.y_scale.max = 0.99, 1.01
+    viewer.reset_view.click()
+    y = viewer.figure.marks[0].y
+    assert viewer.y_scale.min < y.min()
+    assert viewer.y_scale.max > y.max()
+
+
+def test_png_file_name():
+    assert png_file_name("") == "light-curve.png"
+    assert png_file_name("   ") == "light-curve.png"
+    assert png_file_name("TIC 1234") == "TIC 1234.png"
+    assert png_file_name(" V: 2023/02/25  night 1? ") == "V- 2023-02-25 night 1.png"
+    assert png_file_name("...") == "light-curve.png"
+
+
+def test_save_png_uses_title(table, source_list):
+    from unittest import mock
+
+    viewer = LightCurveViewer(table, source_list)
+    with mock.patch.object(type(viewer.figure), "save_png") as save:
+        viewer.save_png.click()
+        save.assert_called_once_with("light-curve.png")
+        save.reset_mock()
+        viewer.title.value = "My star"
+        viewer.save_png.click()
+        save.assert_called_once_with("My star.png")
+
+
+def test_pan_zoom_button_sets_interaction(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    assert viewer.figure.display_toolbar is False
+    assert viewer.figure.interaction is None
+    viewer.pan_zoom.value = True
+    interaction = viewer.figure.interaction
+    assert type(interaction).__name__ == "PanZoom"
+    assert interaction.scales == {"x": [viewer.x_scale], "y": [viewer.y_scale]}
+    viewer.pan_zoom.value = False
+    assert viewer.figure.interaction is None
+    assert list(viewer.view_buttons.children) == [
+        viewer.pan_zoom,
+        viewer.reset_view,
+        viewer.save_png,
+    ]
