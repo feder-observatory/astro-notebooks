@@ -4,9 +4,13 @@ from astropy.time import Time
 from astropy.table import MaskedColumn, QTable, Table
 
 from astro_notebooks.lightcurve_viewer import (
+    ALL_NIGHTS,
     LightCurveViewer,
     available_quantities,
     default_stars,
+    night_keys,
+    night_label,
+    night_options,
     quantity_values,
     star_options,
     x_axis_values,
@@ -82,10 +86,50 @@ def test_instrumental_values_and_errors(table):
     np.testing.assert_allclose(errors, 0.01)
 
 
-def test_relative_flux_values_and_errors(table):
+def test_relative_flux_scaled_to_median_one_per_star(table):
     values, errors = quantity_values(table, "Relative flux")
-    np.testing.assert_allclose(values, table["relative_flux"], equal_nan=True)
-    np.testing.assert_allclose(errors, 0.02)
+    flux = np.asarray(table["relative_flux"], dtype=float)
+    raw_errors = np.asarray(table["relative_flux_error"], dtype=float)
+    for star in (1, 2, 3, 4):
+        rows = np.asarray(table["star_id"]) == star
+        median = np.nanmedian(flux[rows])
+        assert np.nanmedian(values[rows]) == pytest.approx(1.0)
+        np.testing.assert_allclose(values[rows], flux[rows] / median, equal_nan=True)
+        np.testing.assert_allclose(errors[rows], raw_errors[rows] / median)
+    # the NaN point stays NaN
+    assert np.isnan(values[1])
+
+
+def test_relative_flux_scaling_is_per_star():
+    t = QTable(
+        {
+            "star_id": [1, 1, 1, 2, 2, 2],
+            "relative_flux": [2.0, 4.0, 8.0, 0.1, 0.2, 0.4],
+            "relative_flux_error": [0.2, 0.2, 0.2, 0.01, 0.01, 0.01],
+        }
+    )
+    values, errors = quantity_values(t, "Relative flux")
+    np.testing.assert_allclose(values, [0.5, 1, 2, 0.5, 1, 2])
+    np.testing.assert_allclose(errors, [0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    # differential magnitude is zero at the median of each star
+    mags, mag_errors = quantity_values(t, "Differential magnitude")
+    np.testing.assert_allclose(mags, [0.75257499, 0, -0.75257499] * 2, atol=1e-6)
+    # 2.5 / ln(10) * (error / flux) does not depend on the scaling
+    np.testing.assert_allclose(
+        mag_errors, 2.5 / np.log(10) * 0.1 / np.array([1, 2, 4] * 2)
+    )
+
+
+def test_relative_flux_scaling_skips_bad_medians():
+    t = QTable(
+        {
+            "star_id": [1, 1, 2, 2],
+            "relative_flux": [np.nan, np.nan, -1.0, -3.0],
+        }
+    )
+    values, errors = quantity_values(t, "Relative flux")
+    np.testing.assert_allclose(values, [np.nan, np.nan, -1.0, -3.0])
+    assert errors is None
 
 
 def test_calibrated_values_and_errors(table):
@@ -339,7 +383,8 @@ def test_masked_time_and_column_give_nan():
     x, _ = x_axis_values(t, "BJD")
     np.testing.assert_allclose(x, [2459910.0, np.nan, 2459910.2])
     values, errors = quantity_values(t, "Relative flux")
-    np.testing.assert_allclose(values, [1.0, np.nan, 3.0])
+    # no star_id, so the whole table is one star with median 2
+    np.testing.assert_allclose(values, [0.5, np.nan, 1.5])
     assert errors is None
 
 
@@ -381,7 +426,8 @@ def test_figure_is_kept(table, source_list):
     viewer.quantity.value = "Relative flux"
     viewer.passband.value = "V"
     assert viewer.figure is figure
-    assert viewer.children[0] is figure
+    assert viewer.children[0] is viewer.plot
+    assert viewer.plot.children[0] is figure
 
 
 def test_loads_from_files(tmp_path, table, source_list):
@@ -477,3 +523,143 @@ def test_note_is_faded(source_list):
     viewer = LightCurveViewer(make_table(drop=["mag_cal"]), source_list)
     assert "opacity: 0.6" in viewer.quantity_note.value
     assert viewer.quantity_note.layout.max_width == "420px"
+
+
+def make_two_night_table(with_night_column=True):
+    rows = []
+    for night, start in ((60000, 2460000.6), (60003, 2460003.6)):
+        for star in (1, 2):
+            for k in range(N_POINTS):
+                bjd = start + k * 0.01
+                rows.append(
+                    (star, "V", bjd, 1.0 + k * 0.01, 15.0 + 0.1 * k, 0.01, night)
+                )
+    names = ["star_id", "passband", "bjd", "airmass", "mag_inst", "mag_error", "night"]
+    t = QTable(rows=rows, names=names)
+    if not with_night_column:
+        t.remove_column("night")
+    return t
+
+
+def test_night_keys_from_night_column():
+    t = make_two_night_table()
+    keys = night_keys(t)
+    np.testing.assert_array_equal(keys, t["night"])
+    assert night_options(keys) == [("2023-02-25", 60000), ("2023-02-28", 60003)]
+    assert night_label(60000) == "2023-02-25"
+
+
+def test_night_keys_from_gaps_in_bjd():
+    t = make_two_night_table(with_night_column=False)
+    keys = night_keys(t)
+    # MJD of the first image of each night
+    expected = np.where(np.asarray(t["bjd"]) < 2460002, 60000, 60003)
+    np.testing.assert_array_equal(keys, expected)
+    assert [k for _, k in night_options(keys)] == [60000, 60003]
+    # one night, however it straddles a day boundary, is one night
+    one = QTable({"bjd": 2460000.9 + np.arange(5) * 0.1})
+    assert len(night_options(night_keys(one))) == 1
+    # a row with no time has no night
+    t["bjd"][0] = np.nan
+    assert night_keys(t)[0] == -1
+    assert -1 not in [k for _, k in night_options(night_keys(t))]
+
+
+def test_night_keys_without_times():
+    assert list(night_keys(QTable({"star_id": [1, 2]}))) == [-1, -1]
+
+
+def test_night_dropdown_hidden_for_one_night(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    assert viewer.night not in viewer.controls.children
+    assert viewer.night.value == ALL_NIGHTS
+
+
+@pytest.mark.parametrize("with_night_column", [True, False])
+def test_night_dropdown_picks_a_night(with_night_column):
+    t = make_two_night_table(with_night_column)
+    viewer = LightCurveViewer(t)
+    viewer.error_bars.value = False
+    assert viewer.night in viewer.controls.children
+    assert viewer.night.options == (
+        ("All nights", ALL_NIGHTS),
+        ("2023-02-25", 60000),
+        ("2023-02-28", 60003),
+    )
+    assert viewer.night.value == ALL_NIGHTS
+    assert len(viewer.figure.marks[0].x) == 2 * N_POINTS
+
+    viewer.night.value = 60003
+    scatter = viewer.figure.marks[0]
+    assert len(scatter.x) == N_POINTS
+    assert scatter.x.min() == pytest.approx(2460003.6)
+    # the x axis follows the night
+    assert viewer.x_scale.min == pytest.approx(2460003.6 - 0.05 * 0.05)
+    assert viewer.x_scale.max == pytest.approx(2460003.65 + 0.05 * 0.05)
+
+    # hours count from the first image of the night that is shown
+    viewer.x_axis.value = "Hours since first image"
+    assert viewer.figure.marks[0].x.min() == pytest.approx(0)
+    viewer.night.value = ALL_NIGHTS
+    assert viewer.figure.marks[0].x.max() == pytest.approx(3.05 * 24)
+
+
+def test_night_options_follow_passband():
+    t = make_two_night_table()
+    # second night only in R
+    t["passband"][t["night"] == 60003] = "R"
+    viewer = LightCurveViewer(t)
+    assert viewer.passband.value == "R"
+    assert [k for _, k in viewer.night.options] == [ALL_NIGHTS, 60003]
+    viewer.night.value = 60003
+    viewer.passband.value = "V"
+    assert [k for _, k in viewer.night.options] == [ALL_NIGHTS, 60000]
+    assert viewer.night.value == ALL_NIGHTS
+    assert len(viewer.figure.marks[0].x) == N_POINTS
+
+
+def test_relative_flux_scaled_over_all_nights():
+    t = make_two_night_table()
+    t["relative_flux"] = np.where(t["night"] == 60000, 1.0, 3.0)
+    viewer = LightCurveViewer(t)
+    viewer.quantity.value = "Relative flux"
+    viewer.night.value = 60003
+    # the median over both nights is 2, so this night sits at 1.5, not 1
+    np.testing.assert_allclose(viewer.figure.marks[0].y, 1.5)
+
+
+def test_reset_view_refits_current_points(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    x_min, x_max = viewer.x_scale.min, viewer.x_scale.max
+    y_min, y_max = viewer.y_scale.min, viewer.y_scale.max
+    # zoom in, as the pan/zoom interaction would
+    viewer.x_scale.min, viewer.x_scale.max = x_min + 0.02, x_max - 0.02
+    viewer.y_scale.min, viewer.y_scale.max = y_min + 0.1, y_max - 0.1
+    viewer.reset_view.click()
+    assert (viewer.x_scale.min, viewer.x_scale.max) == (x_min, x_max)
+    assert (viewer.y_scale.min, viewer.y_scale.max) == (y_min, y_max)
+    # zoom, then plot something else: the reset fits the new points
+    viewer.x_scale.min, viewer.x_scale.max = x_min + 0.02, x_max - 0.02
+    viewer.quantity.value = "Relative flux"
+    viewer.y_scale.min, viewer.y_scale.max = 0.99, 1.01
+    viewer.reset_view.click()
+    y = viewer.figure.marks[0].y
+    assert viewer.y_scale.min < y.min()
+    assert viewer.y_scale.max > y.max()
+
+
+def test_pan_zoom_button_sets_interaction(table, source_list):
+    viewer = LightCurveViewer(table, source_list)
+    assert viewer.figure.display_toolbar is False
+    assert viewer.figure.interaction is None
+    viewer.pan_zoom.value = True
+    interaction = viewer.figure.interaction
+    assert type(interaction).__name__ == "PanZoom"
+    assert interaction.scales == {"x": [viewer.x_scale], "y": [viewer.y_scale]}
+    viewer.pan_zoom.value = False
+    assert viewer.figure.interaction is None
+    assert list(viewer.view_buttons.children) == [
+        viewer.pan_zoom,
+        viewer.reset_view,
+        viewer.save_png,
+    ]
