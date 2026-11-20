@@ -23,6 +23,12 @@ COLORS = list(CATEGORY10)
 # Marker shapes, one per night, when more than one night is plotted at once.
 MARKERS = ("circle", "square", "diamond", "triangle-up", "triangle-down", "cross", "plus")
 
+# Size of the plot when the window has room for it, and the narrowest it
+# gets when the window does not.
+PLOT_WIDTH = "650px"
+PLOT_HEIGHT = "450px"
+PLOT_MIN_WIDTH = "250px"
+
 # File name of the PNG when the plot has no title.
 DEFAULT_PNG_NAME = "light-curve"
 
@@ -518,8 +524,10 @@ class LightCurveViewer(ipw.HBox):
             # are stale once another star or quantity has been plotted.
             display_toolbar=False,
         )
-        self.figure.layout.width = "650px"
-        self.figure.layout.height = "450px"
+        # The width is set on the box the figure is in (see below); the
+        # figure fills it, so that it narrows with a narrow window.
+        self.figure.layout.width = "100%"
+        self.figure.layout.height = PLOT_HEIGHT
 
         self._pan_zoom = PanZoom(scales={"x": [self.x_scale], "y": [self.y_scale]})
         button_layout = ipw.Layout(width="auto")
@@ -543,7 +551,12 @@ class LightCurveViewer(ipw.HBox):
             layout=button_layout,
         )
         self.view_buttons = ipw.HBox([self.pan_zoom, self.reset_view, self.save_png])
-        self.plot = ipw.VBox([self.figure, self.view_buttons])
+        # No wider than PLOT_WIDTH, but free to shrink: a plot of fixed width
+        # is cut off on the right when the window is narrower than it is.
+        self.plot = ipw.VBox(
+            [self.figure, self.view_buttons],
+            layout=ipw.Layout(flex=f"0 1 {PLOT_WIDTH}", min_width=PLOT_MIN_WIDTH),
+        )
 
         controls = [
             self.passband,
@@ -560,6 +573,9 @@ class LightCurveViewer(ipw.HBox):
             controls.remove(self.night)
         self.controls = ipw.VBox(controls)
         self.children = [self.plot, self.controls]
+        # The controls drop below the plot when there is no room beside it,
+        # and only then does the plot start to narrow.
+        self.layout.flex_flow = "row wrap"
 
         self._building = False
         self._update_note()

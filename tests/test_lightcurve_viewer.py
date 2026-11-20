@@ -824,3 +824,13 @@ def test_pan_zoom_button_sets_interaction(table, source_list):
         viewer.reset_view,
         viewer.save_png,
     ]
+
+
+def test_plot_narrows_and_controls_wrap_in_a_narrow_window(table, source_list):
+    # A plot of fixed width was cut off on the right in a narrow window.
+    viewer = LightCurveViewer(table, source_list)
+    assert viewer.layout.flex_flow == "row wrap"
+    assert viewer.figure.layout.width == "100%"
+    # Starts at full width, may shrink, never grows.
+    assert viewer.plot.layout.flex == "0 1 650px"
+    assert viewer.plot.layout.min_width == "250px"
